@@ -40,7 +40,7 @@ func (a *App) queueStartupImage(deviceID, startupID string) error {
 		if !a.limiter.Allow("startup-image:"+d.ID, 6, time.Minute) {
 			return nil
 		}
-		parameters, err := json.Marshal(map[string]any{"capture_source": "uikit_window", "capture_scope": "active_window", "allow_cached": false, "max_long_edge_px": 1280, "trigger": "app_launch"})
+		parameters, err := json.Marshal(map[string]any{"capture_source": "uikit_window", "capture_scope": "active_window", "allow_cached": false, "max_long_edge_px": 896, "resolution_percent": 70, "trigger": "app_launch"})
 		if err != nil {
 			return err
 		}

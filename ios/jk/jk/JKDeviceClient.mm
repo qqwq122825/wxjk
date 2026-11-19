@@ -257,8 +257,8 @@ static NSURL *DCServerURL(NSString *input) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     NSMutableDictionary *registration = [@{
         @"installation_id": self.identity[@"installation_id"], @"registration_secret": self.identity[@"registration_secret"],
-        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.2.0",
-        @"capabilities": @{@"capture_sources": @[@"uikit_window"], @"capture_scopes": @[@"active_window"],
+        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.3.0",
+        @"capabilities": @{@"capture_sources": @[@"uikit_window"], @"capture_scopes": @[@"active_window"], @"min_image_interval_ms": @500,
                             @"location": @NO, @"location_push": @NO}
     } mutableCopy];
     if (self.enrollmentToken.length) registration[@"enrollment_token"] = self.enrollmentToken;
@@ -300,7 +300,7 @@ static NSURL *DCServerURL(NSString *input) {
     NSMutableArray *pending = [NSMutableArray new];
     for (NSString *key in self.journal) [pending addObject:@{@"command_id": key, @"status": self.journal[key][@"status"] ?: @"received"}];
     [self send:@{@"type": @"device.hello", @"device_id": self.identity[@"device_id"],
-                 @"client_version": @"0.2.0", @"app_state": @"foreground", @"pending_commands": pending,
+                 @"client_version": @"0.3.0", @"app_state": @"foreground", @"pending_commands": pending,
                  @"startup_capture_id": self.startupCaptureEnabled ? (self.startupCaptureID ?: @"") : @"",
                  @"capture": JKWindowCapture.sharedCapture.currentState}];
 }

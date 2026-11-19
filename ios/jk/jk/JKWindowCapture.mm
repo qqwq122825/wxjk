@@ -35,7 +35,7 @@ static BOOL JKNumber(id value) {
 static NSString *JKTimestamp(NSDate *date) {
     static NSISO8601DateFormatter *formatter;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ formatter = [NSISO8601DateFormatter new]; });
+    dispatch_once(&once, ^{ formatter = [NSISO8601DateFormatter new]; formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds; });
     return [formatter stringFromDate:date];
 }
 
@@ -247,12 +247,21 @@ static NSDate *JKParseDate(id value) {
         dispatch_source_cancel(self.timer);
         self.timer = nil;
     }
-    if (!needed || self.timer) return;
-    self.timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(self.timer, DISPATCH_TIME_NOW, NSEC_PER_SEC, 100 * NSEC_PER_MSEC);
-    __weak JKWindowCapture *weakSelf = self;
-    dispatch_source_set_event_handler(self.timer, ^{ [weakSelf tick]; });
-    dispatch_resume(self.timer);
+    if (!needed) return;
+    if (!self.timer) {
+        self.timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        __weak JKWindowCapture *weakSelf = self;
+        dispatch_source_set_event_handler(self.timer, ^{
+            [weakSelf tick];
+            [weakSelf updateTimer];
+        });
+        dispatch_resume(self.timer);
+    }
+    // One deadline per frame, not a 1s polling clock; slow encoding/uploads never queue frames.
+    double delay = MAX(0.01, self->_policy.nextCapture - JKNow());
+    if (self.captureBusy || self.uploadTask) delay = MAX(delay, 0.05);
+    dispatch_source_set_timer(self.timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                             DISPATCH_TIME_FOREVER, 5 * NSEC_PER_MSEC);
 }
 
 - (void)tick {
@@ -588,7 +597,7 @@ static NSDate *JKParseDate(id value) {
     auto found = _policy.records.find(taskID.UTF8String);
     if (found == _policy.records.end() || found->second.terminal || ![saved[@"desired_running"] boolValue]) return;
     double interval = [saved[@"interval"] doubleValue];
-    if (!isfinite(interval) || interval < 3 || interval > 3600) return;
+    if (!isfinite(interval) || interval < 0.5 || interval > 3600) return;
     self.taskExpiresAt = JKParseDate(saved[@"expires_at"]);
     if (saved[@"expires_at"] != NSNull.null && !self.taskExpiresAt) return;
     _policy.taskID = taskID.UTF8String;

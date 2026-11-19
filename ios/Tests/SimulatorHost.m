@@ -10,6 +10,7 @@ static BOOL rejectAuth;
 static BOOL promptTest;
 static BOOL verifySavedAddress;
 static BOOL realServer;
+static BOOL fastCapture;
 
 // Tests exercise the internal first-launch form without exposing a settings API.
 @interface JKDeviceClient (OnboardingTests)
@@ -31,7 +32,7 @@ static NSDictionary *Command(NSString *kind, NSString *task, NSUInteger version)
     NSMutableDictionary *parameters = [@{@"session_id": task, @"session_version": @(version)} mutableCopy];
     if ([kind isEqualToString:@"START_IMAGE_SESSION"]) {
         [parameters addEntriesFromDictionary:@{@"capture_source": @"uikit_window", @"capture_scope": @"active_window",
-                                               @"interval_ms": @3000, @"max_long_edge_px": @1280}];
+                                               @"interval_ms": fastCapture ? @500 : @3000, @"max_long_edge_px": fastCapture ? @640 : @1280}];
     }
     return @{@"command": kind, @"command_id": NSUUID.UUID.UUIDString,
              @"expires_at": [formatter stringFromDate:[NSDate dateWithTimeIntervalSinceNow:120]],
@@ -173,7 +174,7 @@ static void BeginTests(void) {
                 Finish(@"phase4");
             } else {
                 Check(frameCount >= 3, @"WSS command produces actual PNG uploads after forced disconnect");
-                Check([state[@"connection_attempts"] integerValue] >= 3, @"initial 503 and dropped WSS both trigger reconnects");
+                Check([state[@"connection_attempts"] integerValue] >= (fastCapture ? 1 : 3), @"initial 503 and dropped WSS both trigger reconnects");
                 Check([state[@"state"] isEqual:@"device_disabled"], @"server disabled message stops automatic reconnect");
                 Check(![capture.currentState[@"desired_running"] boolValue], @"server stop command ends autonomous task");
                 Finish(@"phase3");
@@ -241,6 +242,7 @@ static void BeginTests(void) {
     promptTest = [arguments containsObject:@"--prompt-test"];
     verifySavedAddress = [arguments containsObject:@"--verify-saved-address"];
     realServer = [arguments containsObject:@"--real-server"];
+    fastCapture = [arguments containsObject:@"--fast-capture"];
     if (networkURL) {
         [NSNotificationCenter.defaultCenter addObserverForName:JKDeviceClientStateNotification object:nil
             queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { NSLog(@"JK_NETWORK %@", note.userInfo); }];

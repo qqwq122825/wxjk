@@ -60,7 +60,7 @@ func (a *App) imagePath(name string) string {
 }
 
 func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated *Device) {
-	if !a.limiter.Allow("image:"+authenticated.ID, 10, 10*time.Second) {
+	if !a.limiter.Allow("image:"+authenticated.ID, 30, 10*time.Second) {
 		w.Header().Set("Retry-After", "3")
 		fail(w, 429, "RATE_LIMITED", "图片上传过于频繁")
 		return

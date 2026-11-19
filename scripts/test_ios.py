@@ -16,7 +16,8 @@ def run(*args, **kwargs):
 
 
 def main():
-    output = ROOT / "build/tests"
+    fast = "--fast" in sys.argv
+    output = ROOT / "build/tests" / ("fast" if fast else "normal")
     output.mkdir(parents=True, exist_ok=True)
     executable = output / "capture-policy-tests"
     run("clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-O2", "-I", SOURCE,
@@ -75,7 +76,7 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "1",
         "-config", certificate_config, "-keyout", key, "-out", certificate,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    peer = MockDeviceServer(certificate, key)
+    peer = MockDeviceServer(certificate, key, fast=fast)
     runtimes = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "runtimes", "--json"], text=True))
     runtime = next(r["identifier"] for r in runtimes["runtimes"] if r["isAvailable"] and "iOS-18-1" in r["identifier"])
     device = subprocess.check_output([
@@ -86,11 +87,12 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
         run("xcrun", "simctl", "bootstatus", device, "-b")
         run("xcrun", "simctl", "keychain", device, "add-root-cert", certificate)
         run("xcrun", "simctl", "install", device, app)
-        phases = [("phase3", ["--network-url", peer.URL]),
+        phases = [("phase3", ["--network-url", peer.URL] + (["--fast-capture"] if fast else [])),
                   ("phase4", ["--network-url", peer.URL + "/unauthorized", "--reject-auth"])]
         if "--network-only" not in sys.argv:
             phases = [("phase1", []), ("phase2", ["--verify-restored"])] + phases
         for phase, args in phases:
+            if fast and "--fast-capture" not in args: args = args + ["--fast-capture"]
             run("xcrun", "simctl", "launch", "--terminate-running-process", "--console", device,
                 "com.jk.capturetest", *args, timeout=55)
             container = Path(subprocess.check_output([
@@ -103,11 +105,17 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
                 raise RuntimeError(report)
             print(f"{phase}: PASS ({report['frames']} frames)")
         shutil.copy2(container / "Documents/active-window.png", output / "active-window.png")
-        assert peer.upgrades >= 3, "WSS failures did not cause reconnection"
+        assert peer.upgrades >= (1 if fast else 3), "WSS failures did not cause reconnection"
         assert len(peer.uploads) >= 3, "missing committed PNG uploads"
         assert len({item["report_id"] for item in peer.uploads}) == len(peer.uploads), "duplicate report identity"
         assert len({item["frame_seq"] for item in peer.uploads}) == len(peer.uploads), "frame sequence restarted on reconnect"
         assert not peer.failures, peer.failures
+        if fast:
+            from datetime import datetime
+            span = (datetime.fromisoformat(peer.uploads[2]["captured_at"].replace("Z", "+00:00")) - datetime.fromisoformat(peer.uploads[0]["captured_at"].replace("Z", "+00:00"))).total_seconds()
+            assert 0.8 <= span <= 1.6, ("500ms capture cadence", span)
+            assert all(max(item["pixel_width"], item["pixel_height"]) <= 640 for item in peer.uploads), "50% PNG resolution not applied"
+            print(f"FAST PNG: first 3 frames span={span:.3f}s; longest edge <=640px")
         print(f"TLS/WSS: {peer.upgrades} connection attempts, {len(peer.uploads)} PNG uploads verified")
         print(f"Captured test window: {output / 'active-window.png'}")
     finally:

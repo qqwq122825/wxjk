@@ -27,7 +27,7 @@ public:
     Decision start(const std::string &id, uint64_t revision, double seconds,
                    double expires, double now) {
         if (id.empty() || id.size() > 200 || revision == 0 ||
-            !std::isfinite(seconds) || seconds < 3 || seconds > 3600 ||
+            !std::isfinite(seconds) || seconds < 0.5 || seconds > 3600 ||
             !std::isfinite(expires) || !std::isfinite(now) ||
             (expires != 0 && expires <= now)) return Decision::invalid;
         expire(now);

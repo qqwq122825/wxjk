@@ -17,9 +17,11 @@ func commandEnvelope(c Command) map[string]any {
 }
 func (a *App) createCommand(w http.ResponseWriter, r *http.Request, u *userRequest) {
 	var in struct {
-		Type     string `json:"type"`
-		QueueTTL int    `json:"queue_ttl_seconds"`
-		Duration int    `json:"duration_seconds"`
+		Type              string `json:"type"`
+		QueueTTL          int    `json:"queue_ttl_seconds"`
+		Duration          int    `json:"duration_seconds"`
+		IntervalMS        int    `json:"interval_ms"`
+		ResolutionPercent int    `json:"resolution_percent"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -35,6 +37,17 @@ func (a *App) createCommand(w http.ResponseWriter, r *http.Request, u *userReque
 		fail(w, 400, "INVALID_DURATION", "指令有效期或任务时长无效")
 		return
 	}
+	if in.IntervalMS == 0 {
+		in.IntervalMS = 3000
+	}
+	if in.ResolutionPercent == 0 {
+		in.ResolutionPercent = 70
+	}
+	if in.IntervalMS < 500 || in.IntervalMS > 60000 || in.ResolutionPercent < 25 || in.ResolutionPercent > 100 {
+		fail(w, 400, "INVALID_CAPTURE_OPTIONS", "采集间隔需为 500–60000ms，PNG 尺寸比例需为 25–100%")
+		return
+	}
+
 	a.writes.Lock()
 	defer a.writes.Unlock()
 	d, ok := a.authorizedDevice(w, r, u)
@@ -81,7 +94,7 @@ func (a *App) createCommand(w http.ResponseWriter, r *http.Request, u *userReque
 			reused = true
 			return nil
 		}
-		parameters := map[string]any{"capture_source": "uikit_window", "capture_scope": "active_window", "allow_cached": false, "max_long_edge_px": 1280}
+		parameters := map[string]any{"capture_source": "uikit_window", "capture_scope": "active_window", "allow_cached": false, "max_long_edge_px": 1280 * in.ResolutionPercent / 100, "resolution_percent": in.ResolutionPercent}
 		if in.Type == "GET_LOCATION" {
 			parameters = map[string]any{"max_age_seconds": 60, "timeout_seconds": 30}
 		}
@@ -91,7 +104,7 @@ func (a *App) createCommand(w http.ResponseWriter, r *http.Request, u *userReque
 			s := ImageSession{ID: newID("task_"), DeviceID: d.ID, AssignmentID: d.AssignmentID, AssignmentVersion: d.AssignmentVersion, ActorID: u.User.ID, Version: 1, DesiredRunning: true, ObservedState: "queued", StartCommandID: command.ID, CreatedAt: now}
 			parameters["session_id"] = s.ID
 			parameters["session_version"] = 1
-			parameters["interval_ms"] = 3000
+			parameters["interval_ms"] = in.IntervalMS
 			parameters["task_expires_at"] = nil
 			if in.Duration > 0 {
 				deadline := now.Add(time.Duration(in.Duration) * time.Second)

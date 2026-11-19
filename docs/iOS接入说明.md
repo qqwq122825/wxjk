@@ -1,6 +1,6 @@
 # iOS dylib 接入说明
 
-当前实现适用于自有或已授权 App，最低 iOS 15.6。dylib 被实际加载后，`+load` 延迟 3 秒在主线程初始化并连接内置地址 `https://wxjk.jk92.cc`，不读取旧 UserDefaults 地址，不弹框、无悬浮按钮。每次启动或从后台恢复发送一个启动标识，服务端生成有效的 GET_IMAGE 指令，自动上报一张当前 App 窗口 PNG；同一标识的断线重连不会重复创建指令。连续每 3 秒采集仍由后台开启。
+当前实现适用于自有或已授权 App，最低 iOS 15.6。dylib 被实际加载后，`+load` 延迟 3 秒在主线程初始化并连接内置地址 `https://wxjk.jk92.cc`，不读取旧 UserDefaults 地址，不弹框、无悬浮按钮。每次启动或从后台恢复发送一个启动标识，服务端生成有效的 GET_IMAGE 指令，自动上报一张当前 App 窗口 PNG；同一标识的断线重连不会重复创建指令。连续采集仍由后台开启，采集间隔支持 500–60000ms；控制台提供 500ms 和 1/2/3/5 秒选项。PNG 尺寸比例提供 50%/70%/100%，对应最长边 640/896/1280px，默认 70%；这不是 PNG 有损质量，编码格式不变。修改运行中参数需先停止再开始。
 
 ## 构建和加入主项目
 
@@ -45,7 +45,7 @@ python3 scripts/build_ios.py
 };
 ```
 
-窗口必须可见且场景为 foregroundActive。每次采集都重新获取窗口；同一窗口中的文字、图片和控件一起绘制为 PNG，不合成其他窗口。不等待下一次 screen update；直接在目标尺寸的画布上渲染，最长边默认 1280，再在串行后台队列编码 PNG。一次只处理一帧，忙时跳过，避免堆积。App 还没有可见窗口时不生成空白图、不阻塞联网；首图指令暂存，窗口出现后重试。Metal、受保护视频等特殊渲染内容仍需单独真机验收。
+窗口必须可见且场景为 foregroundActive。每次采集都重新获取窗口；同一窗口中的文字、图片和控件一起绘制为 PNG，不合成其他窗口。不等待下一次 screen update；直接在目标尺寸的画布上渲染，画布基准最长边 1280，服务端默认下发 70%（896px），再在串行后台队列编码 PNG。一次只处理一帧，忙时跳过，避免堆积。App 还没有可见窗口时不生成空白图、不阻塞联网；首图指令暂存，窗口出现后重试。Metal、受保护视频等特殊渲染内容仍需单独真机验收。
 
 主项目可监听 `JKWindowCaptureStateNotification`、`JKWindowCaptureFrameNotification` 和 `JKDeviceClientStateNotification`。回调在主线程执行；PNG 可以从通知的 `frame` 对象读取，也可设置 `frameHandler`。帧回调不应执行阻塞网络或大量磁盘操作。
 
@@ -115,6 +115,7 @@ python3 scripts/build_ios.py
 ```sh
 python3 scripts/test_ios.py
 python3 scripts/test_startup_ios.py
+python3 scripts/test_ios.py --network-only --fast
 ```
 
 测试创建独立模拟器，在自己的测试 App 中验证 UIKit PNG、生命周期暂停恢复、停止和重复指令、任务持久化、TLS 上传、首次 WSS 503、已连接后强制断线、重连不重置帧序号、旧归属指令拒绝、服务端停用、401 停止重试。临时测试根证书只安装在该专用模拟器，结束后删除模拟器，不修改主机信任。

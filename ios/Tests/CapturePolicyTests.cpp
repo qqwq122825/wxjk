@@ -81,7 +81,7 @@ int main() {
         const double inf = std::numeric_limits<double>::infinity();
         CHECK(p.start("", 1, 3, 0, 0) == Decision::invalid);
         CHECK(p.start("x", 0, 3, 0, 0) == Decision::invalid);
-        CHECK(p.start("x", 1, 2, 0, 0) == Decision::invalid);
+        CHECK(p.start("x", 1, 0.49, 0, 0) == Decision::invalid);
         CHECK(p.start("x", 1, nan, 0, 0) == Decision::invalid);
         CHECK(p.start("x", 1, inf, 0, 0) == Decision::invalid);
         CHECK(p.start("x", 1, 3, inf, 0) == Decision::invalid);
@@ -89,6 +89,13 @@ int main() {
         CHECK(p.start("x", 1, 3, 0, nan) == Decision::invalid);
         CHECK(p.stop("", 1) == Decision::invalid);
         CHECK(p.records.empty());
+    }
+    {
+        CapturePolicy p;
+        CHECK(p.start("fast", 1, 0.5, 0, 0) == Decision::accepted);
+        p.setActive(true, 0); CHECK(p.due(0)); p.attempted(0);
+        CHECK(!p.due(0.49)); CHECK(p.due(0.5)); p.attempted(0.5);
+        CHECK(!p.due(0.99)); CHECK(p.due(1));
     }
     {
         jk::ReconnectPolicy retry;

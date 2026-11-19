@@ -242,6 +242,13 @@ func (a *App) deviceDetail(w http.ResponseWriter, r *http.Request, u *userReques
 		var session ImageSession
 		if a.db.First(&session, "id = ?", d.ActiveSessionID).Error == nil {
 			result["session"] = session
+			var start Command
+			if a.db.First(&start, "id = ?", session.StartCommandID).Error == nil {
+				var options map[string]any
+				if json.Unmarshal([]byte(start.Parameters), &options) == nil {
+					result["capture_options"] = options
+				}
+			}
 		}
 	}
 	var cmds []Command

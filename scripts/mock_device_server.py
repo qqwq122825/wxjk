@@ -17,7 +17,7 @@ def timestamp(seconds=0):
 
 
 class MockDeviceServer:
-    def __init__(self, certificate, key):
+    def __init__(self, certificate, key, fast=False):
         self.lock = threading.RLock()
         self.upgrades = 0
         self.uploads = []
@@ -29,7 +29,7 @@ class MockDeviceServer:
             "command_id": "mock-start", "created_at": timestamp(), "expires_at": timestamp(180),
             "assignment_id": "mock-assignment", "assignment_version": 1,
             "parameters": {"session_id": "mock-phone-task", "session_version": 1,
-                           "capture_source": "uikit_window", "capture_scope": "active_window", "interval_ms": 3000},
+                           "capture_source": "uikit_window", "capture_scope": "active_window", "interval_ms": 500 if fast else 3000, "max_long_edge_px": 640 if fast else 1280},
         }
         self.stop = {
             "type": "command.dispatch", "command": "STOP_IMAGE_SESSION",
@@ -80,7 +80,7 @@ class MockDeviceServer:
                         total = len(owner.uploads)
                         peer = owner.active_peer
                     self.reply(201, {"report_id": metadata["report_id"], "status": "succeeded"})
-                    if total == 1 and peer:
+                    if total == 1 and peer and not fast:
                         # Cut the network after a committed frame. The phone
                         # task must keep its identity and reconnect without a viewer.
                         try:
@@ -102,7 +102,7 @@ class MockDeviceServer:
                 with owner.lock:
                     owner.upgrades += 1
                     number = owner.upgrades
-                if number == 1:
+                if number == 1 and not fast:
                     self.reply(503, {"error": "intentional initial failure"})
                     return
                 if self.headers.get("Authorization") != "Bearer mock-device-token":
