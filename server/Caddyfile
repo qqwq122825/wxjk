@@ -1,0 +1,4 @@
+{$MONITOR_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy monitor:8080
+}

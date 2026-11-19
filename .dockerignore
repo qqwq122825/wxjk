@@ -1,0 +1,10 @@
+.git
+.cache
+.toolchains
+build
+**/node_modules
+**/.data
+**/.env
+ios
+server/public
+scripts/__pycache__

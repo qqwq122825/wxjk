@@ -1,0 +1,13 @@
+build/
+.DS_Store
+**/xcuserdata/
+__pycache__/
+*.pyc
+.toolchains/
+.cache/
+node_modules/
+server/.data/
+.data/
+.env
+server/web/dist/
+server/public/assets/
