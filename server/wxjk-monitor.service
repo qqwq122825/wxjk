@@ -1,0 +1,22 @@
+[Unit]
+Description=WXJK Monitor backend
+After=network.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/wxjk-monitor/server
+EnvironmentFile=/www/wwwroot/wxjk-monitor/server/.env
+ExecStart=/www/wwwroot/wxjk-monitor/build/server/jk-monitor
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
