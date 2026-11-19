@@ -1,4 +1,5 @@
 #import "JKWindowCapture.h"
+#import "JKDebugLog.h"
 #import "JKCapturePolicy.hpp"
 #import <ImageIO/ImageIO.h>
 #import <mach/mach_time.h>
@@ -310,7 +311,7 @@ static NSDate *JKParseDate(id value) {
 - (void)captureWithContext:(NSDictionary *)context completion:(JKCaptureCompletion)completion {
     NSError *windowError;
     UIWindow *window = [self eligibleWindow:&windowError];
-    if (!window) { completion(nil, windowError); return; }
+    if (!window) { JKMonitorDebugLog(@"capture_skip", @"code=%ld", (long)windowError.code); completion(nil, windowError); return; }
     if (self.captureBusy || self.uploadTask) {
         completion(nil, JKError(JKWindowCaptureBusy, @"上一帧仍在生成或上传"));
         return;
@@ -343,12 +344,14 @@ static NSDate *JKParseDate(id value) {
             complete = [window drawViewHierarchyInRect:bounds afterScreenUpdates:NO];
         }];
     } @catch (NSException *exception) {
+        JKMonitorDebugLog(@"render_failed", @"exception=%@", exception.name);
         self.captureBusy = NO;
         completion(nil, JKError(JKWindowCaptureIncomplete, @"窗口渲染失败"));
         return;
     }
     CGImageRef cgImage = image.CGImage;
     if (!complete || !cgImage) {
+        JKMonitorDebugLog(@"render_failed", @"hierarchy_complete=%d image_available=%d", complete, cgImage != nil);
         self.captureBusy = NO;
         completion(nil, JKError(JKWindowCaptureIncomplete, @"窗口图像不完整"));
         return;
@@ -379,6 +382,7 @@ static NSDate *JKParseDate(id value) {
                     return;
                 }
                 if (!encoded || data.length == 0 || data.length > 8 * 1024 * 1024) {
+                    JKMonitorDebugLog(@"encode_failed", @"encoded=%d bytes=%lu", encoded, (unsigned long)data.length);
                     completion(nil, JKError(JKWindowCaptureIncomplete, @"PNG 编码失败或超过 8 MB 限制"));
                     return;
                 }
@@ -390,6 +394,7 @@ static NSDate *JKParseDate(id value) {
                     @"is_cached": @NO, @"pixel_width": @(width), @"pixel_height": @(height)
                 }];
                 JKCapturedFrame *frame = [JKCapturedFrame new];
+                JKMonitorDebugLog(@"png_ready", @"pixels=%lux%lu bytes=%lu", (unsigned long)width, (unsigned long)height, (unsigned long)data.length);
                 frame.PNGData = data;
                 frame.metadata = metadata;
                 completion(frame, nil);
@@ -548,6 +553,7 @@ static NSDate *JKParseDate(id value) {
         @"session_id": _policy.taskID.empty() ? @"" : [NSString stringWithUTF8String:_policy.taskID.c_str()],
         @"session_version": @(_policy.version), @"screen_state": @"unknown"};
     if ([snapshot isEqual:self.lastState]) return;
+    JKMonitorDebugLog(@"capture_state", @"state=%@ reason=%@", snapshot[@"state"], snapshot[@"reason"]);
     self.lastState = snapshot;
     [NSNotificationCenter.defaultCenter postNotificationName:JKWindowCaptureStateNotification object:self userInfo:snapshot];
 }
@@ -680,6 +686,7 @@ static NSDate *JKParseDate(id value) {
                 }
                 self.uploadTask = nil;
                 NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+            JKMonitorDebugLog(@"upload_http", @"status=%ld error_domain=%@ error_code=%ld", (long)status, error.domain ?: @"none", (long)error.code);
                 if (error || status < 200 || status >= 300) {
                     completion(JKError(JKWindowCaptureUploadFailed, error.localizedDescription ?: [NSString stringWithFormat:@"上传失败 HTTP %ld", (long)status]));
                 } else completion(nil);

@@ -125,3 +125,14 @@ python3 scripts/test_ios.py --network-only --fast
 测试产物保存在 `build/tests`。其中 `active-window.png` 是采集器实际生成的窗口图片；各阶段 JSON 是验收结果。模拟器的非活动测试通过公开生命周期通知触发，真实手机按键熄屏和目标 App 特殊渲染内容仍需真机验收。
 
 当前已有 [Go 服务端和总台代理网页](../server/README.md)，可与本 dylib 联调。原本地模拟服务继续用于失败场景测试。手机端定位采集、APNs、证书发布和主项目发布签名仍待接入；生产域名与真实 iPhone 需现场验收。
+
+
+## 调试日志（0.3.1）
+
+版本仍不显示弹窗或悬浮窗。Xcode 控制台或连接手机的 Console.app 搜索 `[JKMonitor]`。`[load]` 表示 dylib 已执行加载入口，`[bootstrap]` 表示主线程已执行 3 秒后的启动；这两步必须先于排查网络和截图。
+
+按顺序观察：`client_init` → `configuration` → `keychain_read/write` → `register_http` → `client_state` 的 `connecting/synchronizing/connected` → `command` → `png_ready` → `upload_http`。已有有效设备身份时跳过注册是正常的。注册/上传记录 HTTP 状态，联网错误记录 NSError domain/code，Keychain 记录 OSStatus；不打印令牌、密码、请求体、定位或图片内容。
+
+同一日志异步写入宿主 App 沙盒 `Library/Caches/JKMonitor/jk-monitor.log`，约 256KiB 滚动，保留一份 `jk-monitor.previous.log`，文件权限 0600。通过 Xcode 的 Devices and Simulators 下载该 App 容器后，可在 `AppData/Library/Caches/JKMonitor/` 找到；也可由宿主调用 `JKMonitorDebugLogPath()` 获取本地路径。日志只保存在本机，不自动上传。
+
+没有 `[load]` 时优先核对宿主实际链接/加载、打包位置和签名；只有 `[load]` 没有 `[bootstrap]` 时检查主线程是否卡住。存在 `connected` 但没有 PNG 时查看 `capture_skip`、`render_failed` 或 `command_error`。本地原始构建产物未签名不代表最终安装包也未签名，必须检查实际安装的 App，而不是据此直接认定故障。

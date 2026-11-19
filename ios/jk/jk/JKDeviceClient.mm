@@ -1,4 +1,5 @@
 #import "JKDeviceClient.h"
+#import "JKDebugLog.h"
 #import "JKWindowCapture.h"
 #import "JKReconnectPolicy.hpp"
 #import <CommonCrypto/CommonDigest.h>
@@ -98,6 +99,7 @@ static NSURL *DCServerURL(NSString *input) {
     if (self.initialized) return;
     self.initialized = YES;
     self.foreground = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+    JKMonitorDebugLog(@"client_init", @"app_active=%d protected_data=%d", self.foreground, UIApplication.sharedApplication.protectedDataAvailable);
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.timeoutIntervalForRequest = 15;
     configuration.timeoutIntervalForResource = 20;
@@ -111,6 +113,7 @@ static NSURL *DCServerURL(NSString *input) {
             queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 JKDeviceClient *client = weakSelf;
                 if (!client) return;
+                if (![note.name isEqual:JKWindowCaptureStateNotification]) JKMonitorDebugLog(@"lifecycle", @"%@", note.name);
                 if ([note.name isEqualToString:UIApplicationDidBecomeActiveNotification]) {
                     if (!client.foreground) client.startupCaptureID = NSUUID.UUID.UUIDString;
                     client.foreground = YES;
@@ -170,6 +173,7 @@ static NSURL *DCServerURL(NSString *input) {
         if (changed) [JKWindowCapture.sharedCapture setCaptureAuthorized:NO];
         self.serverURL = URL;
         self.enrollmentToken = [token copy];
+        JKMonitorDebugLog(@"configuration", @"host=%@ startup_image=%d", URL.host, self.startupCaptureEnabled);
         self.identityAccount = URL.absoluteString;
         NSURL *support = [[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask] firstObject];
         self.journalURL = [[support URLByAppendingPathComponent:@"JKMonitor" isDirectory:YES]
@@ -192,6 +196,7 @@ static NSURL *DCServerURL(NSString *input) {
     query[(__bridge id)kSecReturnData] = @YES;
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    JKMonitorDebugLog(@"keychain_read", @"status=%d", (int)status);
     NSData *data = status == errSecSuccess ? CFBridgingRelease(result) : nil;
     id raw = data ? [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil] : nil;
     self.identity = [raw isKindOfClass:NSDictionary.class] ? raw : [NSMutableDictionary new];
@@ -213,6 +218,7 @@ static NSURL *DCServerURL(NSString *input) {
         [query addEntriesFromDictionary:attributes];
         status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
     }
+    JKMonitorDebugLog(@"keychain_write", @"status=%d", (int)status);
     return status == errSecSuccess;
 }
 
@@ -221,7 +227,10 @@ static NSURL *DCServerURL(NSString *input) {
 }
 
 - (void)connectIfNeeded {
-    if (!self.running || !self.foreground || self.socket || self.registrationTask) return;
+    if (!self.running || !self.foreground || self.socket || self.registrationTask) {
+        JKMonitorDebugLog(@"connect_skip", @"running=%d foreground=%d socket=%d registering=%d", self.running, self.foreground, self.socket != nil, self.registrationTask != nil);
+        return;
+    }
     if (!DCString(self.identity[@"device_token"]).length) { [self registerDevice]; return; }
     [self cancelRetry];
     NSUInteger generation = ++self.generation;
@@ -257,7 +266,7 @@ static NSURL *DCServerURL(NSString *input) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     NSMutableDictionary *registration = [@{
         @"installation_id": self.identity[@"installation_id"], @"registration_secret": self.identity[@"registration_secret"],
-        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.3.0",
+        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.3.1",
         @"capabilities": @{@"capture_sources": @[@"uikit_window"], @"capture_scopes": @[@"active_window"], @"min_image_interval_ms": @500,
                             @"location": @NO, @"location_push": @NO}
     } mutableCopy];
@@ -270,6 +279,7 @@ static NSURL *DCServerURL(NSString *input) {
             if (generation != self.registrationGeneration || !self.running) return;
             self.registrationTask = nil;
             NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+            JKMonitorDebugLog(@"register_http", @"status=%ld error_domain=%@ error_code=%ld", (long)status, error.domain ?: @"none", (long)error.code);
             if (status == 401 || status == 403) { [self blockForAuthorization:status]; return; }
             if (error || status < 200 || status >= 300) { [self retryAfterFailure:@"registration_failed"]; return; }
             id result = data.length <= 64 * 1024 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
@@ -300,7 +310,7 @@ static NSURL *DCServerURL(NSString *input) {
     NSMutableArray *pending = [NSMutableArray new];
     for (NSString *key in self.journal) [pending addObject:@{@"command_id": key, @"status": self.journal[key][@"status"] ?: @"received"}];
     [self send:@{@"type": @"device.hello", @"device_id": self.identity[@"device_id"],
-                 @"client_version": @"0.3.0", @"app_state": @"foreground", @"pending_commands": pending,
+                 @"client_version": @"0.3.1", @"app_state": @"foreground", @"pending_commands": pending,
                  @"startup_capture_id": self.startupCaptureEnabled ? (self.startupCaptureID ?: @"") : @"",
                  @"capture": JKWindowCapture.sharedCapture.currentState}];
 }
@@ -310,6 +320,7 @@ static NSURL *DCServerURL(NSString *input) {
         DCMain(^{
             if (generation != self.generation || task != self.socket) return;
             if (error) {
+                JKMonitorDebugLog(@"ws_error", @"domain=%@ code=%ld", error.domain, (long)error.code);
                 NSInteger status = [task.response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)task.response).statusCode : 0;
                 if (status == 401 || status == 403) [self blockForAuthorization:status];
                 else [self retryAfterFailure:@"wss_receive_failed"];
@@ -407,6 +418,7 @@ static NSURL *DCServerURL(NSString *input) {
 }
 
 - (void)acceptCommand:(NSDictionary *)command {
+    JKMonitorDebugLog(@"command", @"type=%@", DCString(command[@"command"]) ?: @"invalid");
     NSString *key = DCString(command[@"command_id"]);
     NSDate *expiry = DCDate(command[@"expires_at"]);
     if (!key.length || key.length > 200 || !DCString(command[@"command"]).length || !expiry) return;
@@ -460,6 +472,7 @@ static NSURL *DCServerURL(NSString *input) {
         [JKWindowCapture.sharedCapture handleCommand:command completion:^(NSDictionary *result, NSError *error) {
             [self.executing removeObject:key];
             if (self.journal[key] != entry) return;
+            if (error) JKMonitorDebugLog(@"command_error", @"type=%@ code=%ld", kind, (long)error.code);
             if (error.code == JKWindowCaptureWaitingForeground || error.code == JKWindowCaptureBusy ||
                 error.code == JKWindowCaptureNoWindow || error.code == JKWindowCaptureIncomplete) {
                 entry[@"status"] = @"waiting_foreground";
@@ -567,6 +580,7 @@ static NSURL *DCServerURL(NSString *input) {
 
 - (void)URLSession:(NSURLSession *)session webSocketTask:(NSURLSessionWebSocketTask *)task
     didCloseWithCode:(NSURLSessionWebSocketCloseCode)closeCode reason:(NSData *)reason {
+    JKMonitorDebugLog(@"ws_closed", @"close_code=%ld current_socket=%d", (long)closeCode, task == self.socket);
     if (task == self.socket && self.running) [self retryAfterFailure:@"peer_closed_wss"];
 }
 
@@ -577,6 +591,7 @@ static NSURL *DCServerURL(NSString *input) {
 }
 
 - (void)publish:(NSString *)state reason:(NSString *)reason delay:(double)delay {
+    JKMonitorDebugLog(@"client_state", @"state=%@ reason=%@ retry_delay=%.2f attempts=%lu", state, reason, delay, (unsigned long)self.attempts);
     self.lastState = @{@"state": state, @"reason": reason, @"retry_delay_seconds": @(delay),
                         @"connection_attempts": @(self.attempts), @"retry_failures": @(_retry.failures)};
     [NSNotificationCenter.defaultCenter postNotificationName:JKDeviceClientStateNotification object:self userInfo:self.lastState];

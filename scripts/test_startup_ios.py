@@ -4,7 +4,7 @@ import argparse,json,platform,plistlib,shutil,subprocess,sys,socket,tempfile,tim
 ROOT=Path(__file__).resolve().parents[1];P=ROOT/'build/tests/startup';P.mkdir(parents=True,exist_ok=True)
 sys.path.insert(0,str(ROOT/'scripts'));import server as tool
 sys.path.insert(0,str(ROOT/'scripts'));from test_server_ios import Browser,wait
-parser=argparse.ArgumentParser();parser.add_argument('--source',type=Path,default=ROOT/'ios/jk/jk');parser.add_argument('--label',default='current');args=parser.parse_args();args.source=args.source.resolve()
+parser=argparse.ArgumentParser();parser.add_argument('--source',type=Path,default=ROOT/'ios/jk/jk');parser.add_argument('--label',default='current');parser.add_argument('--require-debug',action='store_true');args=parser.parse_args();args.source=args.source.resolve()
 out=P/'ios-builtin-tests'/args.label;out.mkdir(parents=True,exist_ok=True)
 def run(*cmd,**kw):return subprocess.run(list(map(str,cmd)),check=True,**kw)
 sdk=subprocess.check_output(['xcrun','--sdk','iphonesimulator','--show-sdk-path'],text=True).strip();arch='arm64' if platform.machine()=='arm64' else 'x86_64'
@@ -41,6 +41,18 @@ try:
  images=browser.api('GET',f"/api/v1/devices/{devices[0]['id']}/images")['items'] if devices else []
  report['server_images']=len(images)
  if len(images)!=2:report['passed']=False;report['failures'].append('actual server must receive exactly two automatic PNGs')
+ if args.require_debug:
+  diagnostic=container/'Library/Caches/JKMonitor/jk-monitor.log'
+  text=diagnostic.read_text() if diagnostic.exists() else ''
+  console=r.stdout+r.stderr
+  required=['[JKMonitor][load]','[JKMonitor][bootstrap]','[JKMonitor][client_state]','[JKMonitor][register_http]','[JKMonitor][png_ready]','[JKMonitor][upload_http]']
+  report['debug_console_markers']=all(marker in console for marker in required)
+  report['debug_file_markers']=all(marker in text for marker in required)
+  report['debug_no_secret_fields']=not any(marker in text for marker in ['Bearer ','device_token','registration_secret','PNGData'])
+  report['debug_file_private']=diagnostic.exists() and diagnostic.stat().st_mode & 0o777 == 0o600
+  if diagnostic.exists():shutil.copy2(diagnostic,out/'jk-monitor.log')
+  for key in ['debug_console_markers','debug_file_markers','debug_no_secret_fields','debug_file_private']:
+   if not report[key]:report['passed']=False;report['failures'].append(key)
  (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
  if (container/'Documents/startup-window.png').exists():shutil.copy2(container/'Documents/startup-window.png',out/'startup-window.png')
  print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)

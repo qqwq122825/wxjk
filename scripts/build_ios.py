@@ -32,6 +32,7 @@ def build(sdk: str) -> Path:
     ], check=True)
     (output / "JKWindowCapture.h").write_bytes((SOURCE / "JKWindowCapture.h").read_bytes())
     (output / "JKDeviceClient.h").write_bytes((SOURCE / "JKDeviceClient.h").read_bytes())
+    (output / "JKDebugLog.h").write_bytes((SOURCE / "JKDebugLog.h").read_bytes())
     if simulator:
         subprocess.run(["codesign", "--force", "--sign", "-", str(library)], check=True)
     print(library)
