@@ -34,7 +34,7 @@ def main():
         "CFBundleName": "JKCaptureTest", "CFBundlePackageType": "APPL",
         "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0", "MinimumOSVersion": "15.6",
         "LSRequiresIPhoneOS": True, "UIDeviceFamily": [1, 2],
-        "JKMonitor": {"prompt_for_server": False},
+        "JKMonitor": {"server_url": "https://localhost:9", "startup_capture": False},
         "UILaunchScreen": {},
         "UIApplicationSceneManifest": {
             "UIApplicationSupportsMultipleScenes": False,
@@ -87,9 +87,7 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
         run("xcrun", "simctl", "keychain", device, "add-root-cert", certificate)
         run("xcrun", "simctl", "install", device, app)
         phases = [("phase3", ["--network-url", peer.URL]),
-                  ("phase4", ["--network-url", peer.URL + "/unauthorized", "--reject-auth"]),
-                  ("phase5", ["--network-url", peer.URL + "/unauthorized", "--prompt-test"]),
-                  ("phase6", ["--verify-saved-address"])]
+                  ("phase4", ["--network-url", peer.URL + "/unauthorized", "--reject-auth"])]
         if "--network-only" not in sys.argv:
             phases = [("phase1", []), ("phase2", ["--verify-restored"])] + phases
         for phase, args in phases:

@@ -10,7 +10,8 @@ FOUNDATION_EXPORT NSString * const JKDeviceClientStateNotification;
 @property(nonatomic, readonly) NSDictionary<NSString *, id> *currentState;
 
 // Automatically called by +load after three seconds. Configuration is read from
-// the host app's JKMonitor.plist, or the JKMonitor dictionary in its Info.plist.
+// the built-in https://wxjk.jk92.cc by default; no address UI or saved URL required.
+// An explicit JKMonitor.server_url host configuration can override it for testing.
 - (void)startFromMainBundleConfiguration;
 - (void)configureWithServerURL:(NSURL *)URL enrollmentToken:(nullable NSString *)token;
 - (void)stop;

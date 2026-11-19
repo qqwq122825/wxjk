@@ -6,7 +6,7 @@
 #import <Security/Security.h>
 
 NSString * const JKDeviceClientStateNotification = @"JKDeviceClientStateNotification";
-static NSString * const DCServerAddressKey = @"JKMonitor.serverURL.v1";
+static NSString * const DCDefaultServerAddress = @"https://wxjk.jk92.cc";
 
 static NSString *DCString(id value) { return [value isKindOfClass:NSString.class] ? value : nil; }
 static void DCMain(dispatch_block_t block) {
@@ -69,15 +69,10 @@ static NSURL *DCServerURL(NSString *input) {
 @property(nonatomic) NSUInteger registrationGeneration;
 @property(nonatomic) NSString *connectionID;
 @property(nonatomic) NSDictionary *lastState;
-@property(nonatomic) BOOL needsAddressPrompt;
-@property(nonatomic) BOOL promptScheduled;
-@property(nonatomic) UIAlertController *serverPrompt;
-@property(nonatomic) id serverPromptObserver;
-@property(nonatomic) NSString *suggestedAddress;
+@property(nonatomic) NSString *startupCaptureID;
+@property(nonatomic) BOOL startupCaptureEnabled;
 @property(nonatomic) NSString *currentAssignmentID;
 @property(nonatomic) NSUInteger currentAssignmentVersion;
-- (void)requestServerAddress;
-- (BOOL)saveServerAddress:(NSString *)address error:(NSError **)error;
 @end
 
 @implementation JKDeviceClient
@@ -117,6 +112,7 @@ static NSURL *DCServerURL(NSString *input) {
                 JKDeviceClient *client = weakSelf;
                 if (!client) return;
                 if ([note.name isEqualToString:UIApplicationDidBecomeActiveNotification]) {
+                    if (!client.foreground) client.startupCaptureID = NSUUID.UUID.UUIDString;
                     client.foreground = YES;
                     [client cancelRetry];
                     [client connectIfNeeded];
@@ -129,7 +125,6 @@ static NSURL *DCServerURL(NSString *input) {
                     if ([note.name isEqualToString:JKWindowCaptureStateNotification])
                         [client send:@{@"type": @"device.capture_state", @"capture": note.userInfo ?: @{}}];
                 }
-                if (client.needsAddressPrompt) [client tryPresentServerPrompt];
             }]];
     }
     self.pathMonitor = nw_path_monitor_create();
@@ -152,131 +147,14 @@ static NSURL *DCServerURL(NSString *input) {
         NSDictionary *configuration = file ? [NSDictionary dictionaryWithContentsOfURL:file error:nil] : nil;
         if (!configuration) configuration = [NSBundle.mainBundle objectForInfoDictionaryKey:@"JKMonitor"];
         if (![configuration isKindOfClass:NSDictionary.class]) configuration = @{};
-        self.enrollmentToken = DCString(configuration[@"enrollment_token"]);
-        NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:DCServerAddressKey];
-        NSURL *savedURL = DCServerURL(saved);
-        if (savedURL) {
-            [self configureWithServerURL:savedURL enrollmentToken:self.enrollmentToken];
-        } else if (configuration[@"prompt_for_server"] && ![configuration[@"prompt_for_server"] boolValue]) {
-            NSURL *configuredURL = DCServerURL(DCString(configuration[@"server_url"]));
-            if (configuredURL) [self configureWithServerURL:configuredURL enrollmentToken:self.enrollmentToken];
-            else [self publish:@"waiting_configuration" reason:@"missing_server_url" delay:0];
-        } else {
-            self.suggestedAddress = DCString(configuration[@"server_url"]);
-            [self requestServerAddress];
-        }
+        // Production needs no plist or saved address. Explicit host overrides are for authorized testing/deployment.
+        NSString *configured = DCString(configuration[@"server_url"]);
+        NSURL *URL = DCServerURL(configured.length ? configured : DCDefaultServerAddress);
+        if (!URL) { [self publish:@"configuration_error" reason:@"invalid_server_url" delay:0]; return; }
+        self.startupCaptureEnabled = !configuration[@"startup_capture"] || [configuration[@"startup_capture"] boolValue];
+        self.startupCaptureID = NSUUID.UUID.UUIDString;
+        [self configureWithServerURL:URL enrollmentToken:DCString(configuration[@"enrollment_token"])];
     });
-}
-
-- (void)requestServerAddress {
-    DCMain(^{
-        [self initializeIfNeeded];
-        if (self.serverPrompt.presentingViewController) return;
-        self.needsAddressPrompt = YES;
-        self.suggestedAddress = [NSUserDefaults.standardUserDefaults stringForKey:DCServerAddressKey]
-            ?: self.serverURL.absoluteString ?: self.suggestedAddress;
-        self.running = NO;
-        [self disconnect];
-        [JKWindowCapture.sharedCapture setCaptureAuthorized:NO];
-        [self tryPresentServerPrompt];
-    });
-}
-
-- (void)tryPresentServerPrompt {
-    if (!self.needsAddressPrompt || self.serverPrompt || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
-    UIWindow *window;
-    JKCaptureWindowProvider provider = JKWindowCapture.sharedCapture.windowProvider;
-    if (provider) window = provider();
-    else {
-        NSMutableArray *windows = [NSMutableArray new];
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *candidate in ((UIWindowScene *)scene).windows)
-                if (candidate.isKeyWindow && !candidate.hidden) [windows addObject:candidate];
-        }
-        if (windows.count == 1) window = windows.firstObject;
-        if (UIApplication.sharedApplication.connectedScenes.count == 0 &&
-            [UIApplication.sharedApplication.delegate respondsToSelector:@selector(window)])
-            window = UIApplication.sharedApplication.delegate.window;
-    }
-    UIViewController *presenter = window.rootViewController;
-    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
-    if (!presenter || !window || window.hidden || [presenter isKindOfClass:UIAlertController.class]) {
-        if (!self.promptScheduled) {
-            self.promptScheduled = YES;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                self.promptScheduled = NO;
-                [self tryPresentServerPrompt];
-            });
-        }
-        return;
-    }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"设置服务器地址"
-        message:@"填写服务器地址，保存后下次启动会自动连接。"
-        preferredStyle:UIAlertControllerStyleAlert];
-    self.serverPrompt = alert;
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"https://你的服务器域名";
-        field.text = self.suggestedAddress;
-        field.keyboardType = UIKeyboardTypeURL;
-        field.autocorrectionType = UITextAutocorrectionTypeNo;
-        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        field.accessibilityIdentifier = @"JKMonitorServerAddress";
-    }];
-    __weak JKDeviceClient *weakSelf = self;
-    __weak UIAlertController *weakAlert = alert;
-    UIAlertAction *connect = [UIAlertAction actionWithTitle:@"保存并连接" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        JKDeviceClient *client = weakSelf;
-        NSString *address = weakAlert.textFields.firstObject.text;
-        NSError *error;
-        if (![client saveServerAddress:address error:&error]) {
-            client.serverPrompt = nil;
-            [client publish:@"configuration_error" reason:error.localizedDescription delay:0];
-            [client tryPresentServerPrompt];
-        }
-    }];
-    connect.enabled = DCServerURL(alert.textFields.firstObject.text) != nil;
-    self.serverPromptObserver = [NSNotificationCenter.defaultCenter addObserverForName:UITextFieldTextDidChangeNotification
-        object:alert.textFields.firstObject queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            connect.enabled = DCServerURL(((UITextField *)note.object).text) != nil;
-        }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"稍后设置" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        JKDeviceClient *client = weakSelf;
-        client.needsAddressPrompt = NO;
-        [client clearServerPrompt];
-        [client publish:@"waiting_configuration" reason:@"server_address_deferred" delay:0];
-    }]];
-    [alert addAction:connect];
-    [self publish:@"waiting_configuration" reason:@"server_address_required" delay:0];
-    [presenter presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)clearServerPrompt {
-    if (self.serverPromptObserver) [NSNotificationCenter.defaultCenter removeObserver:self.serverPromptObserver];
-    self.serverPromptObserver = nil;
-    [self.serverPrompt dismissViewControllerAnimated:YES completion:nil];
-    self.serverPrompt = nil;
-}
-
-- (BOOL)saveServerAddress:(NSString *)address error:(NSError **)error {
-    __block BOOL saved = NO;
-    __block NSError *failure;
-    dispatch_block_t save = ^{
-        NSURL *URL = DCServerURL(address);
-        if (!URL) {
-            failure = [NSError errorWithDomain:@"JKMonitorConfiguration" code:1
-                userInfo:@{NSLocalizedDescriptionKey: @"请输入有效的 HTTPS 服务器地址"}];
-            return;
-        }
-        [NSUserDefaults.standardUserDefaults setObject:URL.absoluteString forKey:DCServerAddressKey];
-        self.needsAddressPrompt = NO;
-        [self clearServerPrompt];
-        [self configureWithServerURL:URL enrollmentToken:self.enrollmentToken];
-        saved = YES;
-    };
-    if (NSThread.isMainThread) save(); else dispatch_sync(dispatch_get_main_queue(), save);
-    if (error) *error = failure;
-    return saved;
 }
 
 - (void)configureWithServerURL:(NSURL *)URL enrollmentToken:(NSString *)token {
@@ -379,7 +257,7 @@ static NSURL *DCServerURL(NSString *input) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     NSMutableDictionary *registration = [@{
         @"installation_id": self.identity[@"installation_id"], @"registration_secret": self.identity[@"registration_secret"],
-        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.1.0",
+        @"platform": @"ios", @"os_version": UIDevice.currentDevice.systemVersion, @"client_version": @"0.2.0",
         @"capabilities": @{@"capture_sources": @[@"uikit_window"], @"capture_scopes": @[@"active_window"],
                             @"location": @NO, @"location_push": @NO}
     } mutableCopy];
@@ -422,7 +300,8 @@ static NSURL *DCServerURL(NSString *input) {
     NSMutableArray *pending = [NSMutableArray new];
     for (NSString *key in self.journal) [pending addObject:@{@"command_id": key, @"status": self.journal[key][@"status"] ?: @"received"}];
     [self send:@{@"type": @"device.hello", @"device_id": self.identity[@"device_id"],
-                 @"client_version": @"0.1.0", @"app_state": @"foreground", @"pending_commands": pending,
+                 @"client_version": @"0.2.0", @"app_state": @"foreground", @"pending_commands": pending,
+                 @"startup_capture_id": self.startupCaptureEnabled ? (self.startupCaptureID ?: @"") : @"",
                  @"capture": JKWindowCapture.sharedCapture.currentState}];
 }
 
@@ -581,7 +460,8 @@ static NSURL *DCServerURL(NSString *input) {
         [JKWindowCapture.sharedCapture handleCommand:command completion:^(NSDictionary *result, NSError *error) {
             [self.executing removeObject:key];
             if (self.journal[key] != entry) return;
-            if (error.code == JKWindowCaptureWaitingForeground || error.code == JKWindowCaptureBusy) {
+            if (error.code == JKWindowCaptureWaitingForeground || error.code == JKWindowCaptureBusy ||
+                error.code == JKWindowCaptureNoWindow || error.code == JKWindowCaptureIncomplete) {
                 entry[@"status"] = @"waiting_foreground";
                 [self saveJournal];
                 [self send:@{@"type": @"command.progress", @"command_id": key, @"status": @"waiting_foreground"}];

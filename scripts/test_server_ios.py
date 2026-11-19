@@ -58,7 +58,7 @@ def main():
         "CFBundleName": "JKServerIntegration", "CFBundlePackageType": "APPL", "CFBundleDevelopmentRegion": "zh_CN",
         "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0", "MinimumOSVersion": "15.6",
         "LSRequiresIPhoneOS": True, "UIDeviceFamily": [1, 2], "UILaunchScreen": {},
-        "JKMonitor": {"prompt_for_server": False},
+        "JKMonitor": {"server_url": "https://localhost:9", "startup_capture": False},
         "UIApplicationSceneManifest": {"UIApplicationSupportsMultipleScenes": False,
             "UISceneConfigurations": {"UIWindowSceneSessionRoleApplication": [{
                 "UISceneConfigurationName": "Default", "UISceneDelegateClassName": "HostSceneDelegate"}]}},

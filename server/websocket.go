@@ -181,6 +181,12 @@ func (a *App) deviceSocket(w http.ResponseWriter, r *http.Request, d *Device) {
 		a.db.Model(&Device{}).Where("id = ?", d.ID).Updates(updates)
 		switch kind {
 		case "device.hello":
+			var startupID string
+			if json.Unmarshal(message["startup_capture_id"], &startupID) == nil {
+				if err := a.queueStartupImage(current.ID, startupID); err != nil {
+					return
+				}
+			}
 			a.applyCaptureState(current, message["capture"])
 			a.hub.Sync(d.ID)
 		case "device.heartbeat":

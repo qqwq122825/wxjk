@@ -188,13 +188,19 @@ static NSDate *JKParseDate(id value) {
         for (UIScene *scene in app.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) continue;
             for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
-                if (candidate.isKeyWindow && !candidate.hidden && candidate.alpha > 0) [candidates addObject:candidate];
+                if (!candidate.hidden && candidate.alpha > 0 && candidate.windowLevel == UIWindowLevelNormal &&
+                    candidate.rootViewController && candidate.bounds.size.width > 0 && candidate.bounds.size.height > 0)
+                    [candidates addObject:candidate];
             }
         }
         if (app.connectedScenes.count == 0 && [app.delegate respondsToSelector:@selector(window)]) {
             UIWindow *legacyWindow = app.delegate.window;
             if (legacyWindow.isKeyWindow && !legacyWindow.hidden) [candidates addObject:legacyWindow];
         }
+        NSArray<UIWindow *> *keys = [candidates filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(UIWindow *candidate, NSDictionary *bindings) {
+            return candidate.isKeyWindow;
+        }]];
+        if (keys.count == 1) candidates = [keys mutableCopy];
         if (candidates.count > 1) {
             if (error) *error = JKError(JKWindowCaptureAmbiguousWindow, @"多个前台窗口，需要主项目提供 windowProvider");
             return nil;
@@ -324,7 +330,8 @@ static NSDate *JKParseDate(id value) {
             CGContextFillRect(cg, (CGRect){CGPointZero, pixels});
             CGContextScaleCTM(cg, pixels.width / size.width, pixels.height / size.height);
             CGContextTranslateCTM(cg, -bounds.origin.x, -bounds.origin.y);
-            complete = [window drawViewHierarchyInRect:bounds afterScreenUpdates:YES];
+            // Render the currently displayed UIKit hierarchy without waiting for another screen update.
+            complete = [window drawViewHierarchyInRect:bounds afterScreenUpdates:NO];
         }];
     } @catch (NSException *exception) {
         self.captureBusy = NO;
