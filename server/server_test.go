@@ -272,8 +272,8 @@ func TestPNGUploadHistoryAndTransferRevocation(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != 200 || !bytes.HasPrefix(body, []byte{137, 80, 78, 71}) {
-		t.Fatal("owner cannot retrieve PNG")
+	if response.StatusCode != 200 || response.Header.Get("Content-Type") != "image/jpeg" || !bytes.HasPrefix(body, []byte{0xff, 0xd8, 0xff}) {
+		t.Fatal("owner cannot retrieve converted JPEG")
 	}
 	south.request("GET", "/api/v1/images/"+id+"/file", nil, 404)
 	old := d

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"image/png"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -50,7 +55,24 @@ func assignmentMatches(d Device, id string, version uint64) bool {
 	return d.AssignmentID == id && d.AssignmentVersion == version
 }
 
-var fileNamePattern = regexp.MustCompile(`^[a-f0-9]{32}\.png$`)
+var fileNamePattern = regexp.MustCompile(`^[a-f0-9]{32}\.(png|jpe?g)$`)
+
+// Derive format from the stored file name so existing PNG rows need no migration.
+func (report ImageReport) MarshalJSON() ([]byte, error) {
+	type reportJSON ImageReport
+	format, contentType := "", ""
+	if fileNamePattern.MatchString(report.FileName) {
+		format, contentType = "jpg", "image/jpeg"
+		if strings.HasSuffix(report.FileName, ".png") {
+			format, contentType = "png", "image/png"
+		}
+	}
+	return json.Marshal(struct {
+		reportJSON
+		Format      string `json:"format"`
+		ContentType string `json:"content_type"`
+	}{reportJSON(report), format, contentType})
+}
 
 func (a *App) imagePath(name string) string {
 	if !fileNamePattern.MatchString(name) {
@@ -91,25 +113,40 @@ func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated 
 	}
 	input, _, err := r.FormFile("image")
 	if err != nil {
-		fail(w, 400, "INVALID_IMAGE", "缺少 PNG 图片")
+		fail(w, 400, "INVALID_IMAGE", "缺少 PNG 或 JPG 图片")
 		return
 	}
 	defer input.Close()
 	data, err := io.ReadAll(io.LimitReader(input, (8<<20)+1))
 	if err != nil || len(data) > 8<<20 {
-		fail(w, 413, "IMAGE_TOO_LARGE", "PNG 超过 8 MB")
+		fail(w, 413, "IMAGE_TOO_LARGE", "图片超过 8 MB")
 		return
 	}
-	info, err := png.DecodeConfig(bytes.NewReader(data))
-	if err != nil || info.Width <= 0 || info.Height <= 0 || info.Width > 2560 || info.Height > 2560 || info.Width*info.Height > 2560*2560 || info.Width != meta.Width || info.Height != meta.Height {
-		fail(w, 422, "INVALID_PNG", "PNG 无效或像素尺寸不匹配")
+	info, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || (format != "png" && format != "jpeg") || info.Width <= 0 || info.Height <= 0 || info.Width > 2560 || info.Height > 2560 || info.Width*info.Height > 2560*2560 || info.Width != meta.Width || info.Height != meta.Height {
+		fail(w, 422, "INVALID_IMAGE", "PNG/JPG 无效或像素尺寸不匹配")
 		return
 	}
-	if _, err = png.Decode(bytes.NewReader(data)); err != nil {
-		fail(w, 422, "INVALID_PNG", "PNG 内容不完整")
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		fail(w, 422, "INVALID_IMAGE", "PNG/JPG 内容不完整")
 		return
 	}
-	name := newID("") + ".png"
+	// Existing iOS clients may keep uploading PNG; store/display JPEG without a client update.
+	opaque := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
+	draw.Draw(opaque, opaque.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	draw.Draw(opaque, opaque.Bounds(), decoded, decoded.Bounds().Min, draw.Over)
+	var encoded bytes.Buffer
+	if err = jpeg.Encode(&encoded, opaque, &jpeg.Options{Quality: 85}); err != nil {
+		fail(w, 500, "STORAGE_ERROR", "JPG 编码失败")
+		return
+	}
+	data = encoded.Bytes()
+	if len(data) > 8<<20 {
+		fail(w, 413, "IMAGE_TOO_LARGE", "处理后的 JPG 超过 8 MB")
+		return
+	}
+	name := newID("") + ".jpg"
 	path := a.imagePath(name)
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		fail(w, 500, "STORAGE_ERROR", "图片写入失败")
@@ -124,7 +161,7 @@ func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated 
 	a.writes.Lock()
 	defer a.writes.Unlock()
 	var report ImageReport
-	var removeOld string
+	var removeOld []string
 	err = a.db.Transaction(func(tx *gorm.DB) error {
 		var d Device
 		if e := tx.First(&d, "id = ?", authenticated.ID).Error; e != nil {
@@ -192,23 +229,34 @@ func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated 
 				return e
 			}
 		}
+		latestID := d.LatestImageID
 		if !updateLatest {
 			report.FileName = ""
 		} else {
-			if d.LatestImageID != "" {
-				var old ImageReport
-				if tx.First(&old, "id = ?", d.LatestImageID).Error == nil && !old.KeepHistory && old.FileName != "" {
-					removeOld = a.imagePath(old.FileName)
-					if e := tx.Model(&old).Update("file_name", "").Error; e != nil {
-						return e
-					}
-				}
-			}
+			latestID = report.ID
 			if e := tx.Model(&d).Updates(map[string]any{"latest_image_id": report.ID, "last_image_at": now, "last_seen_at": now, "capture_state": "running"}).Error; e != nil {
 				return e
 			}
 		}
-		return tx.Create(&report).Error
+		if e := tx.Create(&report).Error; e != nil {
+			return e
+		}
+		// A browser can still be decoding the previous latest URL when the next frame
+		// arrives. Keep transient frames readable for 30 seconds, but not in history.
+		var expired []ImageReport
+		if e := tx.Where("device_id = ? AND keep_history = ? AND file_name <> ? AND received_at < ? AND id <> ?", d.ID, false, "", now.Add(-30*time.Second), latestID).Order("received_at asc").Limit(120).Find(&expired).Error; e != nil {
+			return e
+		}
+		for _, old := range expired {
+			oldPath := a.imagePath(old.FileName)
+			if e := tx.Model(&old).Update("file_name", "").Error; e != nil {
+				return e
+			}
+			if oldPath != "" {
+				removeOld = append(removeOld, oldPath)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		uploadFailure(w, err)
@@ -217,8 +265,8 @@ func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated 
 	if report.FileName == name {
 		committed = true
 	}
-	if removeOld != "" {
-		_ = os.Remove(removeOld)
+	for _, oldPath := range removeOld {
+		_ = os.Remove(oldPath)
 	}
 	jsonOut(w, 201, map[string]any{"id": report.ID, "report_id": report.ReportID, "status": "succeeded"})
 }
@@ -228,7 +276,7 @@ func (a *App) images(w http.ResponseWriter, r *http.Request, u *userRequest) {
 	if !ok {
 		return
 	}
-	q := a.db.Where("device_id = ? AND file_name <> ?", d.ID, "")
+	q := a.db.Where("device_id = ? AND file_name <> ? AND (keep_history = ? OR id = ?)", d.ID, "", true, d.LatestImageID)
 	if u.User.Role != "admin" {
 		q = q.Where("assignment_id = ?", d.AssignmentID)
 	}
@@ -252,7 +300,11 @@ func (a *App) imageFile(w http.ResponseWriter, r *http.Request, u *userRequest) 
 		fail(w, 404, "NOT_FOUND", "图片不存在")
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
+	contentType := "image/jpeg"
+	if strings.HasSuffix(image.FileName, ".png") {
+		contentType = "image/png"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "private, no-store")
 	http.ServeFile(w, r, path)
 }
