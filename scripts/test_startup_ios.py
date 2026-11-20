@@ -40,21 +40,21 @@ try:
  devices=browser.api('GET','/api/v1/devices')['items'];report['server_devices']=len(devices)
  images=browser.api('GET',f"/api/v1/devices/{devices[0]['id']}/images")['items'] if devices else []
  report['server_images']=len(images)
- if len(images)!=2:report['passed']=False;report['failures'].append('actual server must receive exactly two automatic PNGs')
+ if len(images)!=2:report['passed']=False;report['failures'].append('actual server must receive exactly two automatic JPGs')
  if args.require_debug:
   diagnostic=container/'Library/Caches/JKMonitor/jk-monitor.log'
   text=diagnostic.read_text() if diagnostic.exists() else ''
   console=r.stdout+r.stderr
-  required=['[JKMonitor][load]','[JKMonitor][bootstrap]','[JKMonitor][client_state]','[JKMonitor][register_http]','[JKMonitor][png_ready]','[JKMonitor][upload_http]']
+  required=['[JKMonitor][load]','[JKMonitor][bootstrap]','[JKMonitor][client_state]','[JKMonitor][register_http]','[JKMonitor][jpeg_ready]','[JKMonitor][upload_http]']
   report['debug_console_markers']=all(marker in console for marker in required)
   report['debug_file_markers']=all(marker in text for marker in required)
-  report['debug_no_secret_fields']=not any(marker in text for marker in ['Bearer ','device_token','registration_secret','PNGData'])
+  report['debug_no_secret_fields']=not any(marker in text for marker in ['Bearer ','device_token','registration_secret','PNGData','imageData'])
   report['debug_file_private']=diagnostic.exists() and diagnostic.stat().st_mode & 0o777 == 0o600
   if diagnostic.exists():shutil.copy2(diagnostic,out/'jk-monitor.log')
   for key in ['debug_console_markers','debug_file_markers','debug_no_secret_fields','debug_file_private']:
    if not report[key]:report['passed']=False;report['failures'].append(key)
  (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
- if (container/'Documents/startup-window.png').exists():shutil.copy2(container/'Documents/startup-window.png',out/'startup-window.png')
+ if (container/'Documents/startup-window.jpg').exists():shutil.copy2(container/'Documents/startup-window.jpg',out/'startup-window.jpg')
  print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
  passed=report['passed']
 finally:

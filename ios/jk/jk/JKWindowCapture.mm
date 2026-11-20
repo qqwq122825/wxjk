@@ -52,10 +52,11 @@ static NSDate *JKParseDate(id value) {
 }
 
 @interface JKCapturedFrame ()
-@property(nonatomic, readwrite) NSData *PNGData;
+@property(nonatomic, readwrite) NSData *imageData;
 @property(nonatomic, readwrite) NSDictionary<NSString *, id> *metadata;
 @end
 @implementation JKCapturedFrame
+- (NSData *)PNGData { return self.imageData; }
 @end
 
 @interface JKWindowCapture () <NSURLSessionTaskDelegate> {
@@ -363,10 +364,11 @@ static NSDate *JKParseDate(id value) {
         @autoreleasepool {
             NSMutableData *data = [NSMutableData new];
             CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data,
-                                                                                 CFSTR("public.png"), 1, NULL);
+                                                                                 CFSTR("public.jpeg"), 1, NULL);
             BOOL encoded = NO;
             if (destination) {
-                CGImageDestinationAddImage(destination, cgImage, NULL);
+                NSDictionary *properties = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
+                CGImageDestinationAddImage(destination, cgImage, (__bridge CFDictionaryRef)properties);
                 encoded = CGImageDestinationFinalize(destination);
                 CFRelease(destination);
             }
@@ -383,7 +385,7 @@ static NSDate *JKParseDate(id value) {
                 }
                 if (!encoded || data.length == 0 || data.length > 8 * 1024 * 1024) {
                     JKMonitorDebugLog(@"encode_failed", @"encoded=%d bytes=%lu", encoded, (unsigned long)data.length);
-                    completion(nil, JKError(JKWindowCaptureIncomplete, @"PNG 编码失败或超过 8 MB 限制"));
+                    completion(nil, JKError(JKWindowCaptureIncomplete, @"JPG 编码失败或超过 8 MB 限制"));
                     return;
                 }
                 NSMutableDictionary *metadata = [context mutableCopy];
@@ -391,11 +393,12 @@ static NSDate *JKParseDate(id value) {
                     @"report_id": NSUUID.UUID.UUIDString,
                     @"capture_source": @"uikit_window", @"capture_scope": @"active_window",
                     @"captured_at": JKTimestamp(capturedAt), @"app_state": @"foreground",
-                    @"is_cached": @NO, @"pixel_width": @(width), @"pixel_height": @(height)
+                    @"is_cached": @NO, @"pixel_width": @(width), @"pixel_height": @(height),
+                    @"image_format": @"jpg", @"content_type": @"image/jpeg", @"jpeg_quality": @85
                 }];
                 JKCapturedFrame *frame = [JKCapturedFrame new];
-                JKMonitorDebugLog(@"png_ready", @"pixels=%lux%lu bytes=%lu", (unsigned long)width, (unsigned long)height, (unsigned long)data.length);
-                frame.PNGData = data;
+                JKMonitorDebugLog(@"jpg_ready", @"pixels=%lux%lu bytes=%lu quality=85", (unsigned long)width, (unsigned long)height, (unsigned long)data.length);
+                frame.imageData = data;
                 frame.metadata = metadata;
                 completion(frame, nil);
             });
@@ -662,8 +665,8 @@ static NSDate *JKParseDate(id value) {
     void (^append)(NSString *) = ^(NSString *text) { [body appendData:[text dataUsingEncoding:NSUTF8StringEncoding]]; };
     append([NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n", boundary]);
     [body appendData:JSON];
-    append([NSString stringWithFormat:@"\r\n--%@\r\nContent-Disposition: form-data; name=\"image\"; filename=\"window.png\"\r\nContent-Type: image/png\r\n\r\n", boundary]);
-    [body appendData:frame.PNGData];
+    append([NSString stringWithFormat:@"\r\n--%@\r\nContent-Disposition: form-data; name=\"image\"; filename=\"window.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n", boundary]);
+    [body appendData:frame.imageData];
     append([NSString stringWithFormat:@"\r\n--%@--\r\n", boundary]);
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:self.uploadURL];
     request.HTTPMethod = @"POST";

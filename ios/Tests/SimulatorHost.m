@@ -11,6 +11,14 @@ static BOOL promptTest;
 static BOOL verifySavedAddress;
 static BOOL realServer;
 static BOOL fastCapture;
+static BOOL formatOnly;
+static NSDictionary *formatProbe;
+
+// Dynamic fallback lets the same probe host load the prior PNG revision too.
+static NSData *FrameData(JKCapturedFrame *frame) {
+    return [frame respondsToSelector:NSSelectorFromString(@"imageData")]
+        ? [frame valueForKey:@"imageData"] : [frame valueForKey:@"PNGData"];
+}
 
 // Tests exercise the internal first-launch form without exposing a settings API.
 @interface JKDeviceClient (OnboardingTests)
@@ -46,7 +54,7 @@ static void Later(double seconds, dispatch_block_t block) {
 static void Finish(NSString *phase) {
     NSDictionary *result = @{@"phase": phase, @"passed": @(failures.count == 0), @"failures": failures,
                               @"frames": @(frameCount), @"client": JKDeviceClient.sharedClient.currentState,
-                              @"capture": JKWindowCapture.sharedCapture.currentState};
+                              @"capture": JKWindowCapture.sharedCapture.currentState, @"format_probe": formatProbe ?: @{}};
     [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil]
         writeToURL:Document([phase stringByAppendingPathExtension:@"json"]) atomically:YES];
     NSLog(@"JK_CAPTURE_TEST %@ %@", phase, failures.count ? @"FAILED" : @"PASSED");
@@ -59,7 +67,7 @@ static void BeginRestoreTest(void) {
     Check([capture.currentState[@"session_id"] isEqual:task] && [capture.currentState[@"desired_running"] boolValue],
           @"phone-owned task survives process restart and delayed bootstrap");
     Later(1, ^{
-        Check(frameCount > 0, @"restored foreground task produces a PNG without a viewer");
+        Check(frameCount > 0, @"restored foreground task produces a JPG without a viewer");
         [capture handleCommand:Command(@"STOP_IMAGE_SESSION", task, 2) completion:^(NSDictionary *result, NSError *error) {
             Check(!error && [result[@"status"] isEqual:@"stopped"], @"restored task can be stopped");
             Finish(@"phase2");
@@ -91,7 +99,7 @@ static void BeginTaskTest(void) {
                     Check(!error && [result[@"status"] isEqual:@"stopped"], @"stop acknowledged");
                     NSUInteger stoppedAt = frameCount;
                     Later(3.3, ^{
-                        Check(frameCount == stoppedAt, @"stopped task does not emit more PNG frames");
+                        Check(frameCount == stoppedAt, @"stopped task does not emit more JPG frames");
                         [capture handleCommand:start completion:^(NSDictionary *late, NSError *lateError) {
                             Check(lateError.code == JKWindowCaptureStaleCommand && !late, @"late start cannot revive stopped task");
                         }];
@@ -173,7 +181,7 @@ static void BeginTests(void) {
                 Check([state[@"connection_attempts"] integerValue] == 1, @"invalid identity is not retried repeatedly");
                 Finish(@"phase4");
             } else {
-                Check(frameCount >= 3, @"WSS command produces actual PNG uploads after forced disconnect");
+                Check(frameCount >= 3, @"WSS command produces actual JPG uploads after forced disconnect");
                 Check([state[@"connection_attempts"] integerValue] >= (fastCapture ? 1 : 3), @"initial 503 and dropped WSS both trigger reconnects");
                 Check([state[@"state"] isEqual:@"device_disabled"], @"server disabled message stops automatic reconnect");
                 Check(![capture.currentState[@"desired_running"] boolValue], @"server stop command ends autonomous task");
@@ -185,13 +193,34 @@ static void BeginTests(void) {
     if (restoring) { BeginRestoreTest(); return; }
     [capture captureOnceWithCompletion:^(JKCapturedFrame *frame, NSError *error) {
         Check(frame && !error, @"active UIKit window renders successfully");
-        const unsigned char expected[] = {137, 80, 78, 71, 13, 10, 26, 10};
-        Check(frame.PNGData.length > 8 && memcmp(frame.PNGData.bytes, expected, 8) == 0, @"output has a valid PNG signature");
+        NSData *data = FrameData(frame);
+        const unsigned char jpegMagic[] = {0xff, 0xd8, 0xff};
+        const unsigned char pngMagic[] = {137, 80, 78, 71, 13, 10, 26, 10};
+        BOOL jpeg = data.length > 4 && memcmp(data.bytes, jpegMagic, 3) == 0;
+        BOOL png = data.length > 8 && memcmp(data.bytes, pngMagic, 8) == 0;
+        UIImage *decoded = [UIImage imageWithData:data];
+        Check(decoded.CGImage != nil, @"encoded image completely decodes");
+        if (formatOnly) {
+            Check(jpeg || png, @"format probe recognizes PNG or JPEG bytes");
+            NSData *referencePNG = decoded ? UIImagePNGRepresentation(decoded) : nil;
+            NSData *referenceJPEG = decoded ? UIImageJPEGRepresentation(decoded, 0.85) : nil;
+            formatProbe = @{@"format": jpeg ? @"jpg" : png ? @"png" : @"unknown", @"bytes": @(data.length),
+                @"pixel_width": frame.metadata[@"pixel_width"] ?: @0, @"pixel_height": frame.metadata[@"pixel_height"] ?: @0,
+                @"decoded": @(decoded.CGImage != nil), @"decoded_png_reference_bytes": @(referencePNG.length),
+                @"decoded_jpeg85_reference_bytes": @(referenceJPEG.length), @"metadata": frame.metadata ?: @{}};
+            [data writeToURL:Document(jpeg ? @"active-window.jpg" : @"active-window.png") atomically:YES];
+            Finish(@"format-probe");
+            return;
+        }
+        Check(jpeg && ((const unsigned char *)data.bytes)[data.length - 2] == 0xff && ((const unsigned char *)data.bytes)[data.length - 1] == 0xd9,
+              @"output has complete JPEG SOI and EOI markers");
+        Check([frame.metadata[@"image_format"] isEqual:@"jpg"] && [frame.metadata[@"content_type"] isEqual:@"image/jpeg"] &&
+              [frame.metadata[@"jpeg_quality"] integerValue] == 85, @"JPEG metadata matches the encoder");
         Check([frame.metadata[@"capture_source"] isEqual:@"uikit_window"], @"frame declares window source");
         Check([frame.metadata[@"pixel_width"] integerValue] <= 1280 && [frame.metadata[@"pixel_height"] integerValue] <= 1280,
               @"configured maximum output size respected");
-        [frame.PNGData writeToURL:Document(@"active-window.png") atomically:YES];
-        // Rendering is synchronous, PNG encoding is asynchronous. Invalidation
+        [FrameData(frame) writeToURL:Document(@"active-window.jpg") atomically:YES];
+        // Rendering is synchronous, JPEG encoding is asynchronous. Invalidation
         // in between must discard the encoded image rather than deliver it.
         [capture captureOnceWithCompletion:^(JKCapturedFrame *late, NSError *lateError) {
             Check(!late && lateError.code == JKWindowCaptureCanceled, @"frame encoded across deactivation is discarded");
@@ -215,7 +244,7 @@ static void BeginTests(void) {
     UIViewController *controller = [UIViewController new];
     controller.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.15 blue:0.25 alpha:1];
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(24, 130, 340, 180)];
-    label.text = @"JK UIKit Window\nOwn App Capture\nPNG · 3 second task";
+    label.text = @"JK UIKit Window\nOwn App Capture\nImage · 3 second task";
     label.numberOfLines = 0;
     label.font = [UIFont boldSystemFontOfSize:26];
     label.textColor = UIColor.whiteColor;
@@ -243,15 +272,16 @@ static void BeginTests(void) {
     verifySavedAddress = [arguments containsObject:@"--verify-saved-address"];
     realServer = [arguments containsObject:@"--real-server"];
     fastCapture = [arguments containsObject:@"--fast-capture"];
+    formatOnly = [arguments containsObject:@"--format-only"];
     if (networkURL) {
         [NSNotificationCenter.defaultCenter addObserverForName:JKDeviceClientStateNotification object:nil
             queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { NSLog(@"JK_NETWORK %@", note.userInfo); }];
     }
     JKWindowCapture.sharedCapture.frameHandler = ^(JKCapturedFrame *frame) {
         frameCount++;
-        if (frameCount == 1) [frame.PNGData writeToURL:Document(@"active-window.png") atomically:YES];
+        if (frameCount == 1) [FrameData(frame) writeToURL:Document(@"active-window.jpg") atomically:YES];
         Check(NSThread.isMainThread, @"frame callback is on main thread");
-        Check(frame.PNGData.length > 0, @"task frame is not empty");
+        Check(FrameData(frame).length > 0, @"task frame is not empty");
     };
     Later(3.8, ^{ BeginTests(); });
     Later(40, ^{ Check(NO, @"test timeout"); Finish(restoring ? @"phase2" : @"phase1"); });

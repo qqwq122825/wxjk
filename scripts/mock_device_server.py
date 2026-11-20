@@ -21,6 +21,7 @@ class MockDeviceServer:
         self.lock = threading.RLock()
         self.upgrades = 0
         self.uploads = []
+        self.upload_details = []
         self.registrations = 0
         self.active_peer = None
         self.failures = []
@@ -70,13 +71,32 @@ class MockDeviceServer:
                     message = BytesParser(policy=default).parsebytes(
                         f"Content-Type: {self.headers['Content-Type']}\r\nMIME-Version: 1.0\r\n\r\n".encode() + data
                     )
+                    members = list(message.iter_parts())
+                    names = [part.get_param("name", header="content-disposition") for part in members]
                     parts = {part.get_param("name", header="content-disposition"): part.get_payload(decode=True)
-                             for part in message.iter_parts()}
+                             for part in members}
                     metadata = json.loads(parts["metadata"])
-                    if not parts["image"].startswith(b"\x89PNG\r\n\x1a\n"):
-                        owner.failures.append("invalid PNG upload")
+                    image_part = next(part for part in members if part.get_param("name", header="content-disposition") == "image")
+                    image = parts["image"]
+                    boundary = message.get_boundary()
+                    complete_body = (len(data) == int(self.headers.get("Content-Length", "0")) and
+                                     bool(boundary) and data.endswith(("\r\n--" + boundary + "--\r\n").encode()))
+                    details = {"image_bytes": len(image), "body_bytes": len(data), "content_type": image_part.get_content_type(),
+                               "filename": image_part.get_filename(), "complete_body": complete_body,
+                               "metadata_parts": names.count("metadata"), "image_parts": names.count("image"),
+                               "transfer_encoding": self.headers.get("Transfer-Encoding", ""),
+                               "soi": image[:3].hex(), "eoi": image[-2:].hex()}
+                    if not image.startswith(b"\xff\xd8\xff") or not image.endswith(b"\xff\xd9"):
+                        owner.failures.append("invalid or incomplete JPEG upload")
+                    if image_part.get_content_type() != "image/jpeg" or image_part.get_filename() != "window.jpg":
+                        owner.failures.append("JPEG MIME or filename mismatch")
+                    if not complete_body or names.count("metadata") != 1 or names.count("image") != 1 or self.headers.get("Transfer-Encoding"):
+                        owner.failures.append("frame was not one complete metadata+image multipart POST")
+                    if metadata.get("image_format") != "jpg" or metadata.get("content_type") != "image/jpeg" or metadata.get("jpeg_quality") != 85:
+                        owner.failures.append("JPEG metadata mismatch")
                     with owner.lock:
                         owner.uploads.append(metadata)
+                        owner.upload_details.append(details)
                         total = len(owner.uploads)
                         peer = owner.active_peer
                     self.reply(201, {"report_id": metadata["report_id"], "status": "succeeded"})

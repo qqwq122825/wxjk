@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from build_ios import ROOT, SOURCE, build
+import build_ios
 from mock_device_server import MockDeviceServer
 
 
@@ -16,6 +17,11 @@ def run(*args, **kwargs):
 
 
 def main():
+    global SOURCE
+    if "--source" in sys.argv:
+        SOURCE = Path(sys.argv[sys.argv.index("--source") + 1]).resolve()
+        build_ios.SOURCE = SOURCE
+    format_only = "--format-only" in sys.argv
     fast = "--fast" in sys.argv
     output = ROOT / "build/tests" / ("fast" if fast else "normal")
     output.mkdir(parents=True, exist_ok=True)
@@ -91,6 +97,8 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
                   ("phase4", ["--network-url", peer.URL + "/unauthorized", "--reject-auth"])]
         if "--network-only" not in sys.argv:
             phases = [("phase1", []), ("phase2", ["--verify-restored"])] + phases
+        if format_only:
+            phases = [("format-probe", ["--format-only"])]
         for phase, args in phases:
             if fast and "--fast-capture" not in args: args = args + ["--fast-capture"]
             run("xcrun", "simctl", "launch", "--terminate-running-process", "--console", device,
@@ -104,20 +112,30 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
                 print(f"Mock server: registrations={peer.registrations}, WSS={peer.upgrades}, uploads={len(peer.uploads)}")
                 raise RuntimeError(report)
             print(f"{phase}: PASS ({report['frames']} frames)")
-        shutil.copy2(container / "Documents/active-window.png", output / "active-window.png")
+        if format_only:
+            probe = report["format_probe"]
+            extension = probe["format"]
+            shutil.copy2(container / ("Documents/active-window." + extension), output / ("active-window." + extension))
+            print("FORMAT_PROBE " + json.dumps(probe, sort_keys=True), flush=True)
+            return
+        shutil.copy2(container / "Documents/active-window.jpg", output / "active-window.jpg")
         assert peer.upgrades >= (1 if fast else 3), "WSS failures did not cause reconnection"
-        assert len(peer.uploads) >= 3, "missing committed PNG uploads"
+        assert len(peer.uploads) >= 3, "missing committed JPG uploads"
         assert len({item["report_id"] for item in peer.uploads}) == len(peer.uploads), "duplicate report identity"
         assert len({item["frame_seq"] for item in peer.uploads}) == len(peer.uploads), "frame sequence restarted on reconnect"
         assert not peer.failures, peer.failures
+        assert len(peer.upload_details) == len(peer.uploads), "missing wire image details"
+        (output / "upload-wire-details.json").write_text(json.dumps(peer.upload_details, indent=2) + "\n")
+        assert all(item["complete_body"] and item["image_parts"] == 1 and item["metadata_parts"] == 1 for item in peer.upload_details), "image is not delivered in one complete POST"
+        print("WIRE: one complete multipart POST per frame, image/jpeg window.jpg; image bytes=" + str([item["image_bytes"] for item in peer.upload_details]))
         if fast:
             from datetime import datetime
             span = (datetime.fromisoformat(peer.uploads[2]["captured_at"].replace("Z", "+00:00")) - datetime.fromisoformat(peer.uploads[0]["captured_at"].replace("Z", "+00:00"))).total_seconds()
             assert 0.8 <= span <= 1.6, ("500ms capture cadence", span)
-            assert all(max(item["pixel_width"], item["pixel_height"]) <= 640 for item in peer.uploads), "50% PNG resolution not applied"
-            print(f"FAST PNG: first 3 frames span={span:.3f}s; longest edge <=640px")
-        print(f"TLS/WSS: {peer.upgrades} connection attempts, {len(peer.uploads)} PNG uploads verified")
-        print(f"Captured test window: {output / 'active-window.png'}")
+            assert all(max(item["pixel_width"], item["pixel_height"]) <= 640 for item in peer.uploads), "50% JPG resolution not applied"
+            print(f"FAST JPG: first 3 frames span={span:.3f}s; longest edge <=640px")
+        print(f"TLS/WSS: {peer.upgrades} connection attempts, {len(peer.uploads)} JPG uploads verified")
+        print(f"Captured test window: {output / 'active-window.jpg'}")
     finally:
         subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
         subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)

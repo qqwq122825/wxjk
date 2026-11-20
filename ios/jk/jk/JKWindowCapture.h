@@ -22,7 +22,11 @@ typedef NS_ENUM(NSInteger, JKWindowCaptureError) {
 };
 
 @interface JKCapturedFrame : NSObject
-@property(nonatomic, readonly) NSData *PNGData;
+// Complete JPEG data, encoded before frame delivery or upload.
+@property(nonatomic, readonly) NSData *imageData;
+// Source/binary compatibility only: this alias now contains the same JPEG bytes.
+@property(nonatomic, readonly) NSData *PNGData
+    __attribute__((deprecated("Use imageData; frames now contain JPEG bytes.")));
 @property(nonatomic, readonly) NSDictionary<NSString *, id> *metadata;
 @end
 

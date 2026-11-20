@@ -24,7 +24,7 @@ static void Finish(void) {
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
  self.window=[[UIWindow alloc]initWithWindowScene:(UIWindowScene *)scene];hostWindow=self.window;
  UIViewController *controller=[UIViewController new];controller.view.backgroundColor=[UIColor colorWithRed:0.08 green:0.17 blue:0.14 alpha:1];
- UILabel *label=[[UILabel alloc]initWithFrame:CGRectMake(24,150,340,200)];label.text=@"JK 自有 App 窗口\n启动 3 秒自动上线\n启动首张 PNG 自动上报\n连续采集由后台开启";label.numberOfLines=0;label.textColor=UIColor.whiteColor;label.font=[UIFont boldSystemFontOfSize:23];[controller.view addSubview:label];
+ UILabel *label=[[UILabel alloc]initWithFrame:CGRectMake(24,150,340,200)];label.text=@"JK 自有 App 窗口\n启动 3 秒自动上线\n启动首张 JPG 自动上报\n连续采集由后台开启";label.numberOfLines=0;label.textColor=UIColor.whiteColor;label.font=[UIFont boldSystemFontOfSize:23];[controller.view addSubview:label];
  UIView *card=[[UIView alloc]initWithFrame:CGRectMake(24,390,300,180)];card.backgroundColor=[UIColor colorWithRed:0.4 green:0.8 blue:0.6 alpha:1];card.layer.cornerRadius=24;[controller.view addSubview:card];
  self.window.rootViewController=controller;
  Later(5,^{windowReady=NSDate.date;[self.window makeKeyAndVisible];});
@@ -39,7 +39,10 @@ static void Finish(void) {
  [NSUserDefaults.standardUserDefaults setObject:@"https://obsolete.invalid" forKey:@"JKMonitor.serverURL.v1"];
  [NSNotificationCenter.defaultCenter addObserverForName:JKDeviceClientStateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){if(!connected && [note.userInfo[@"state"] isEqual:@"connected"])connected=NSDate.date;}];
  JKWindowCapture.sharedCapture.frameHandler=^(JKCapturedFrame *frame){
-  frames++;[frame.PNGData writeToURL:Document(@"startup-window.png") atomically:YES];
+  frames++;NSData *data=frame.imageData;
+  UIImage *decoded=[UIImage imageWithData:data];
+  if(data.length<4 || memcmp(data.bytes,"\xff\xd8\xff",3)!=0 || !decoded.CGImage)[failures addObject:@"startup frame is not a complete decodable JPEG"];
+  [data writeToURL:Document(@"startup-window.jpg") atomically:YES];
   if(frames==1)Later(1,^{
    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationWillResignActiveNotification object:application];
    [JKWindowCapture.sharedCapture captureOnceWithCompletion:^(JKCapturedFrame *ignored,NSError *error){inactiveRejected=!ignored && error.code==JKWindowCaptureWaitingForeground;}];

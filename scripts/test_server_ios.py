@@ -131,10 +131,11 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
         browser.api("POST", f"/api/v1/devices/{d['id']}/commands", {"type": "GET_IMAGE"})
         def detail():
             return browser.api("GET", f"/api/v1/devices/{d['id']}")
-        image = wait("native single PNG upload", lambda: detail().get("latest_image"))
+        image = wait("native single JPG upload", lambda: detail().get("latest_image"))
         picture = browser.api("GET", f"/api/v1/images/{image['id']}/file", binary=True)
-        assert picture.startswith(b"\x89PNG\r\n\x1a\n")
-        (output / "server-ios-window.png").write_bytes(picture)
+        assert picture.startswith(b"\xff\xd8\xff") and picture.endswith(b"\xff\xd9")
+        assert image["format"] == "jpg" and image["content_type"] == "image/jpeg"
+        (output / "server-ios-window.jpg").write_bytes(picture)
         browser.api("POST", f"/api/v1/devices/{d['id']}/commands", {"type": "START_IMAGE_SESSION"})
         wait("native autonomous task", lambda: detail().get("session", {}).get("last_frame_seq", 0) >= 2)
         old_image = detail()["latest_image"]["id"]
@@ -149,10 +150,10 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
         container = Path(subprocess.check_output(["xcrun", "simctl", "get_app_container", device, "com.jk.serverintegration", "data"], text=True).strip())
         report = json.loads((container / "Documents/server-integration.json").read_text())
         assert report["passed"], report
-        report["go_server_flow"] = ["register", "assign", "single_png", "autonomous_task", "web_logout_keeps_task", "stop_ack"]
-        report["png_sha256"] = hashlib.sha256(picture).hexdigest()
+        report["go_server_flow"] = ["register", "assign", "single_jpg", "autonomous_task", "web_logout_keeps_task", "stop_ack"]
+        report["jpg_sha256"] = hashlib.sha256(picture).hexdigest()
         (output / "server-ios-integration.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-        print("PASS: real iOS dylib → Go HTTPS/WSS → account assignment → PNG → autonomous task → web logout → stop")
+        print("PASS: real iOS dylib → Go HTTPS/WSS → account assignment → JPG → autonomous task → web logout → stop")
     finally:
         if native and native.poll() is None:
             native.terminate()
