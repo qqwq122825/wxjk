@@ -13,6 +13,11 @@ const modal = ref(null), modalEl = ref(null), modalError = ref(''), modalBusy = 
 const serverReachable = ref(true)
 const form = ref({}), toast = ref(null), overviewTab = ref('all'), confirmCallback = ref(null)
 const isAdmin = computed(() => user.value?.role === 'admin')
+const requiresPasswordChange = computed(() => user.value?.role !== 'agent' && !!user.value?.must_change_password)
+const passwordMinLength = computed(() => user.value?.role === 'agent' ? 6 : 10)
+const passwordMaxLength = computed(() => user.value?.role === 'agent' ? 6 : 128)
+const passwordPattern = computed(() => user.value?.role === 'agent' ? '[A-Za-z0-9]{6}' : undefined)
+const passwordHint = computed(() => user.value?.role === 'agent' ? '6 位字母或数字' : '至少 10 位')
 const tabs = computed(() => [
   {id:'overview', name:'工作台', icon:LayoutDashboard},
   {id:'devices', name:isAdmin.value?'全部设备':'我的设备', icon:Smartphone},
@@ -29,38 +34,51 @@ const shortID = id => id ? id.slice(-8).toUpperCase() : '—'
 const date = (v,full=false) => v ? new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',...(full?{month:'2-digit',day:'2-digit'}:{}),hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(v)) : '—'
 const age = v => {if(!v)return '尚无记录';let n=Math.max(0,Math.floor((Date.now()-new Date(v))/1000));return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
 const day = computed(() => new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'long',day:'numeric',weekday:'long'}).format(new Date()))
-let interval, detailPoll, detailPollAt=0, detailRefreshBusy=false, searchTimer, toastTimer, inFlight=false, sessionEpoch=0, detailReturnRoute='#/devices'
-function clearSession(){sessionEpoch++;modalEl.value?.close();user.value=null;csrf.value='';selectedID.value='';detail.value=null;history.value=[];devices.value=[];agents.value=[];commands.value=[];audits.value=[];stats.value={};selected.value=[];modal.value=null;form.value={};confirmCallback.value=null;nav.value='overview';overviewTab.value='all';filter.value='all';search.value='';page.value=1}
-function acceptSession(data){sessionEpoch++;user.value=data.user;csrf.value=data.csrf_token;syncRoute(false)}
+let interval, detailPoll, detailPollAt=0, detailRefreshBusy=null, searchTimer, toastTimer, inFlight=null, sessionEpoch=0, detailReturnRoute='#/devices'
+const pendingRequests = new Set(), API_TIMEOUT_MS = 15000
+function cancelSessionWork(){
+  sessionEpoch++;inFlight=null;detailRefreshBusy=null;loading.value=false;clearTimeout(searchTimer)
+  const previous=[...pendingRequests];pendingRequests.clear()
+  for(const controller of previous)controller.abort()
+}
+function clearSession(){cancelSessionWork();modalEl.value?.close();user.value=null;csrf.value='';selectedID.value='';detail.value=null;history.value=[];detailError.value='';devices.value=[];agents.value=[];commands.value=[];audits.value=[];stats.value={};total.value=0;selected.value=[];modal.value=null;form.value={};modalBusy.value=false;actionBusy.value=false;confirmCallback.value=null;serverReachable.value=false;nav.value='overview';overviewTab.value='all';filter.value='all';search.value='';page.value=1}
+function acceptSession(data){clearSession();user.value=data.user;csrf.value=data.csrf_token;syncRoute(false)}
 
 async function api(path,options={}) {
-  const requestEpoch=sessionEpoch
+  const requestEpoch=sessionEpoch,controller=new AbortController()
+  let timedOut=false,abortRequest
+  const canceled=new Promise((resolve,reject)=>{abortRequest=()=>{const e=new Error(timedOut?'请求超时，请重试':'登录会话已更新');e.code=timedOut?'REQUEST_TIMEOUT':'SESSION_CHANGED';reject(e)};controller.signal.addEventListener('abort',abortRequest,{once:true})})
+  const timer=setTimeout(()=>{timedOut=true;controller.abort()},API_TIMEOUT_MS)
+  pendingRequests.add(controller)
   const headers={...(options.body?{'Content-Type':'application/json'}:{}),...(options.method&&options.method!=='GET'?{'X-CSRF-Token':csrf.value}:{}),...options.headers}
-  const response=await fetch('/api/v1'+path,{credentials:'same-origin',...options,headers,body:options.body?JSON.stringify(options.body):undefined})
-  const data=await response.json().catch(()=>({}))
-  if(!response.ok){if(response.status===401&&user.value&&requestEpoch===sessionEpoch)clearSession();const e=new Error(data.error?.message||'请求失败，请稍后重试');e.code=data.error?.code;e.status=response.status;throw e}
-  return data
+  try{
+    const response=await Promise.race([fetch('/api/v1'+path,{credentials:'same-origin',...options,headers,signal:controller.signal,body:options.body?JSON.stringify(options.body):undefined}),canceled])
+    const data=await Promise.race([response.json().catch(()=>({})),canceled])
+    if(requestEpoch!==sessionEpoch){const e=new Error('登录会话已更新');e.code='SESSION_CHANGED';throw e}
+    if(!response.ok){if(response.status===401&&user.value)clearSession();const e=new Error(data.error?.message||'请求失败，请稍后重试');e.code=data.error?.code;e.status=response.status;throw e}
+    return data
+  }finally{clearTimeout(timer);controller.signal.removeEventListener('abort',abortRequest);pendingRequests.delete(controller)}
 }
 function notify(message,error=false){toast.value={message,error};clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.value=null,4500)}
-async function bootstrap(){try{const b=await api('/auth/bootstrap');needsSetup.value=b.needs_setup;needsSetupToken.value=b.requires_setup_token;try{const me=await api('/auth/me');acceptSession(me);if(user.value.must_change_password)openModal('password')}catch{};if(user.value&&!user.value.must_change_password)await loadData()}catch(e){loginError.value=e.message}finally{ready.value=true}}
-async function submitLogin(){loginError.value='';actionBusy.value=true;try{const d=await api(needsSetup.value?'/auth/setup':'/auth/login',{method:'POST',body:login.value});acceptSession(d);login.value.password='';login.value.setup_token='';needsSetup.value=false;if(user.value.must_change_password)openModal('password');else await loadData()}catch(e){loginError.value=e.message}finally{actionBusy.value=false}}
-async function logout(){try{await api('/auth/logout',{method:'POST'})}catch{};clearSession();window.location.hash='/overview'}
+async function bootstrap(){try{const b=await api('/auth/bootstrap');needsSetup.value=b.needs_setup;needsSetupToken.value=b.requires_setup_token;try{const me=await api('/auth/me');acceptSession(me);if(requiresPasswordChange.value)openModal('password')}catch{};if(user.value&&!requiresPasswordChange.value)await loadData()}catch(e){loginError.value=e.message}finally{ready.value=true}}
+async function submitLogin(){loginError.value='';actionBusy.value=true;try{const d=await api(needsSetup.value?'/auth/setup':'/auth/login',{method:'POST',body:login.value});acceptSession(d);login.value.password='';login.value.setup_token='';needsSetup.value=false;if(requiresPasswordChange.value)openModal('password');else await loadData()}catch(e){loginError.value=e.message}finally{actionBusy.value=false}}
+async function logout(){cancelSessionWork();const requestEpoch=sessionEpoch;try{await api('/auth/logout',{method:'POST'})}catch{};if(requestEpoch!==sessionEpoch)return;clearSession();window.location.hash='/overview'}
 async function loadData(silent=false){
-  if(!user.value||user.value.must_change_password||inFlight)return
-  inFlight=true;if(!silent)loading.value=true
-  const requestEpoch=sessionEpoch
+  if(!user.value||requiresPasswordChange.value||inFlight)return
+  const requestEpoch=sessionEpoch,request={epoch:sessionEpoch}
+  inFlight=request;if(!silent)loading.value=true
   try{
     const state=nav.value==='pending'?'unassigned':nav.value==='overview'?overviewTab.value:filter.value
     const query=new URLSearchParams({page:String(page.value),page_size:'50',state,search:search.value})
     const [dashboard,list]=await Promise.all([api('/dashboard'),api('/devices?'+query)])
-    if(requestEpoch!==sessionEpoch||!user.value)return
+    if(requestEpoch!==sessionEpoch||inFlight!==request||!user.value)return
     serverReachable.value=true
     stats.value=dashboard;devices.value=list.items;total.value=list.total
     if(isAdmin.value&&(nav.value==='agents'||modal.value?.type==='assign')){const data=await api('/admin/agents');if(requestEpoch!==sessionEpoch)return;agents.value=data.items}
     if(nav.value==='commands'){const data=await api('/commands?page=1&page_size=100');if(requestEpoch!==sessionEpoch)return;commands.value=data.items}
     if(nav.value==='audit'&&isAdmin.value){const data=await api('/admin/audit');if(requestEpoch!==sessionEpoch)return;audits.value=data.items}
     if(selectedID.value)await refreshDetail()
-  }catch(e){if(requestEpoch===sessionEpoch&&user.value)serverReachable.value=false;if(!silent)notify(e.message,true)}finally{inFlight=false;loading.value=false}
+  }catch(e){if(requestEpoch===sessionEpoch&&inFlight===request&&user.value){serverReachable.value=false;if(!silent&&e.code!=='SESSION_CHANGED')notify(e.message,true)}}finally{if(inFlight===request){inFlight=null;loading.value=false}}
 }
 const deviceHref = id => '#/devices/'+encodeURIComponent(id)
 function setRoute(hash){if(window.location.hash===hash)syncRoute();else window.location.hash=hash}
@@ -74,7 +92,7 @@ function syncRoute(fetchData=true){
     if(!previousID)detailReturnRoute='#/'+(['devices','pending'].includes(nav.value)?nav.value:'devices')
     if(previousID!==match[1]){selectedID.value=match[1];detail.value=null;history.value=[];detailError.value=''}
     document.title=(detail.value?.name||'设备详情')+' · JK Monitor'
-    if(fetchData&&user.value&&!user.value.must_change_password)refreshDetail()
+    if(fetchData&&user.value&&!requiresPasswordChange.value)refreshDetail()
   }else{
     const target=route.slice(1)
     const allowed=tabs.value.some(tab=>tab.id===target)?target:'overview'
@@ -91,25 +109,27 @@ watch([filter,page,overviewTab],()=>loadData())
 watch(search,()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page.value=1;loadData()},300)})
 async function refreshDetail(latestOnly=false){
   const id=selectedID.value,requestEpoch=sessionEpoch
-  if(!id||detailRefreshBusy)return
-  detailRefreshBusy=true
+  if(!id||(detailRefreshBusy?.epoch===requestEpoch&&detailRefreshBusy.id===id))return
+  const request={epoch:requestEpoch,id};detailRefreshBusy=request
   try{
     const [d,h]=await Promise.all([api('/devices/'+id),latestOnly?Promise.resolve(null):api('/devices/'+id+'/images')])
-    if(selectedID.value!==id||requestEpoch!==sessionEpoch)return
+    if(selectedID.value!==id||requestEpoch!==sessionEpoch||detailRefreshBusy!==request)return
     detail.value=d;if(h)history.value=h.items;detailError.value=''
     document.title=d.name+' · JK Monitor'
   }catch(e){
-    if(requestEpoch!==sessionEpoch||selectedID.value!==id)return
+    if(requestEpoch!==sessionEpoch||selectedID.value!==id||detailRefreshBusy!==request)return
     if(e.status===404){closeModal();closeDetail();notify('设备不存在，或访问权限已更新',true)}else detailError.value=e.message
-  }finally{detailRefreshBusy=false}
+  }finally{if(detailRefreshBusy===request)detailRefreshBusy=null}
 }
 function openDevice(d){setRoute(deviceHref(d.id))}
 function closeDetail(){setRoute(detailReturnRoute)}
-async function openModal(type,data={}){modalError.value='';form.value={...data};modal.value={type,...data};if(type==='assign'){try{agents.value=(await api('/admin/agents')).items}catch(e){modalError.value=e.message}};await nextTick();if(modalEl.value&&!modalEl.value.open)modalEl.value.showModal()}
-function closeModal(){if(user.value?.must_change_password&&modal.value?.type==='password')return;modalEl.value?.close();modal.value=null;modalError.value='';confirmCallback.value=null}
+async function openModal(type,data={}){const requestEpoch=sessionEpoch;modalError.value='';form.value={...data};modal.value={type,...data};if(type==='assign'){try{const data=await api('/admin/agents');if(requestEpoch!==sessionEpoch)return;agents.value=data.items}catch(e){if(requestEpoch!==sessionEpoch)return;modalError.value=e.message}};await nextTick();if(requestEpoch===sessionEpoch&&modal.value?.type===type&&modalEl.value&&!modalEl.value.open)modalEl.value.showModal()}
+function closeModal(){if(requiresPasswordChange.value&&modal.value?.type==='password')return;modalEl.value?.close();modal.value=null;modalError.value='';confirmCallback.value=null}
 async function modalSubmit(){modalError.value='';modalBusy.value=true;try{
   const type=modal.value.type
-  if(type==='agent'){await api('/admin/agents',{method:'POST',body:form.value});notify('代理账号已创建，首次登录需修改密码')}
+  if(['agent','reset'].includes(type)&&!agentPasswordOK(form.value.password))throw new Error('代理密码必须是 6 位字母或数字')
+  if(type==='password'&&user.value?.role==='agent'&&!agentPasswordOK(form.value.new_password))throw new Error('代理密码必须是 6 位字母或数字')
+  if(type==='agent'){await api('/admin/agents',{method:'POST',body:form.value});notify('代理账号已创建，可直接登录')}
   if(type==='reset'){await api('/admin/agents/'+modal.value.id+'/password',{method:'POST',body:{password:form.value.password}});notify('初始密码已重置，原登录已失效')}
   if(type==='assign'){if(!form.value.agent_id)throw new Error('请选择接收设备的代理');const ids=modal.value.ids;let done=0;try{for(const id of ids){await api('/admin/devices/'+id+'/assignment',{method:'POST',body:{agent_id:form.value.agent_id}});done++}}catch(e){throw new Error(`已分配 ${done}/${ids.length} 台：${e.message}`)};selected.value=[];notify(`已分配 ${done} 台设备`)}
   if(type==='rename'){await api('/devices/'+modal.value.id,{method:'PATCH',body:form.value});notify('设备信息已保存')}
@@ -117,7 +137,8 @@ async function modalSubmit(){modalError.value='';modalBusy.value=true;try{
   if(type==='confirm'&&confirmCallback.value)await confirmCallback.value()
   modalEl.value?.close();modal.value=null;confirmCallback.value=null;form.value={};await loadData()
  }catch(e){modalError.value=e.message}finally{modalBusy.value=false}}
-function randomPassword(){const chars='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#';const bytes=crypto.getRandomValues(new Uint8Array(16));form.value.password=Array.from(bytes,b=>chars[b%chars.length]).join('')}
+function agentPasswordOK(value){return typeof value==='string'&&value.length===6&&/^[A-Za-z0-9]{6}$/.test(value)}
+function randomPassword(){const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';let password='';while(password.length<6){for(const byte of crypto.getRandomValues(new Uint8Array(12))){if(byte<248)password+=chars[byte%chars.length];if(password.length===6)break}}form.value.password=password}
 async function toggleAgent(agent){await openModal('confirm',{title:agent.enabled?'禁用代理账号':'启用代理账号',message:agent.enabled?`禁用「${agent.display_name}」后，其登录会话和发起的采集任务将撤销，名下设备仍由总台管理。`:`恢复「${agent.display_name}」的登录权限。`});confirmCallback.value=async()=>{await api('/admin/agents/'+agent.id,{method:'PATCH',body:{enabled:!agent.enabled}});notify(agent.enabled?'账号已禁用':'账号已启用')}}
 async function reclaim(d){await openModal('confirm',{title:'回收设备',message:`将「${d.name}」收回总台待分配列表，并撤销原代理访问权限和相关任务。`});confirmCallback.value=async()=>{await api('/admin/devices/'+d.id+'/assignment',{method:'POST',body:{agent_id:''}});notify('设备已收回总台')}}
 async function toggleDevice(d){await openModal('confirm',{title:d.enabled?'停用设备':'启用设备',message:d.enabled?'设备停用后，服务器拒绝其上报并撤销当前采集任务。':'重新允许该设备连接和上报。'});confirmCallback.value=async()=>{await api('/admin/devices/'+d.id+'/enabled',{method:'POST',body:{enabled:!d.enabled}});notify('设备状态已更新')}}
@@ -126,7 +147,7 @@ function toggleSelection(id){selected.value=selected.value.includes(id)?selected
 function toggleAll(){selected.value=selected.value.length===devices.value.length?[]:devices.value.map(d=>d.id)}
 async function copy(text){try{await navigator.clipboard.writeText(text);notify('已复制')}catch{notify('无法复制，请手动选择文本',true)}}
 onMounted(()=>{syncRoute(false);bootstrap();window.addEventListener('hashchange',routeChanged);interval=setInterval(()=>{if(document.visibilityState==='visible')loadData(true)},3000);detailPoll=setInterval(()=>{if(document.visibilityState==='visible'&&selectedID.value&&detail.value?.session?.desired_running&&Date.now()>=detailPollAt){detailPollAt=Date.now()+Math.max(500,detail.value.capture_options?.interval_ms||3000);refreshDetail(true)}},250)})
-onUnmounted(()=>{window.removeEventListener('hashchange',routeChanged);clearInterval(interval);clearInterval(detailPoll);clearTimeout(searchTimer);clearTimeout(toastTimer)})
+onUnmounted(()=>{cancelSessionWork();window.removeEventListener('hashchange',routeChanged);clearInterval(interval);clearInterval(detailPoll);clearTimeout(searchTimer);clearTimeout(toastTimer)})
 </script>
 
 <template>
@@ -169,13 +190,13 @@ onUnmounted(()=>{window.removeEventListener('hashchange',routeChanged);clearInte
     </div>
   </div>
 
-  <dialog ref="modalEl" class="modal" @cancel.prevent="closeModal"><template v-if="modal"><header class="modal-header"><div><span class="eyebrow">{{modal.type==='assign'?'DEVICE ASSIGNMENT':modal.type==='agent'?'NEW AGENT':modal.type==='password'?'ACCOUNT SECURITY':'JK MONITOR'}}</span><h2>{{({agent:'创建代理账号',assign:'分配设备',reset:'重置代理密码',rename:'编辑设备信息',password:user?.must_change_password?'修改初始密码':'修改登录密码',help:'连接与使用说明'})[modal.type]||modal.title}}</h2></div><button v-if="!user?.must_change_password" type="button" class="icon-btn" aria-label="关闭对话框" @click="closeModal"><X/></button></header>
-    <form v-if="['agent','assign','reset','rename','password'].includes(modal.type)" @submit.prevent="modalSubmit"><div class="modal-body"><template v-if="modal.type==='agent'"><p class="modal-description">创建后，将账号和初始密码交给对应代理。</p><label>代理名称<input v-model.trim="form.display_name" placeholder="例如：华东运营组" maxlength="40" required></label><label>登录账号<input v-model.trim="form.username" placeholder="3 至 32 位字母、数字或 ._-" pattern="[A-Za-z0-9_.\-]{3,32}" autocomplete="off" required></label><label>初始密码<div class="password-generator"><input v-model="form.password" placeholder="至少 10 位" minlength="10" maxlength="128" autocomplete="new-password" required><button type="button" @click="randomPassword">随机生成</button></div></label><div class="info-box"><ShieldCheck/>代理首次登录时需要修改初始密码。</div></template>
+  <dialog ref="modalEl" class="modal" @cancel.prevent="closeModal"><template v-if="modal"><header class="modal-header"><div><span class="eyebrow">{{modal.type==='assign'?'DEVICE ASSIGNMENT':modal.type==='agent'?'NEW AGENT':modal.type==='password'?'ACCOUNT SECURITY':'JK MONITOR'}}</span><h2>{{({agent:'创建代理账号',assign:'分配设备',reset:'重置代理密码',rename:'编辑设备信息',password:requiresPasswordChange?'修改初始密码':'修改登录密码',help:'连接与使用说明'})[modal.type]||modal.title}}</h2></div><button v-if="!requiresPasswordChange" type="button" class="icon-btn" aria-label="关闭对话框" @click="closeModal"><X/></button></header>
+    <form v-if="['agent','assign','reset','rename','password'].includes(modal.type)" @submit.prevent="modalSubmit"><div class="modal-body"><template v-if="modal.type==='agent'"><p class="modal-description">创建后，将账号和初始密码交给对应代理。</p><label>代理名称<input v-model.trim="form.display_name" placeholder="例如：华东运营组" maxlength="40" required></label><label>登录账号<input v-model.trim="form.username" placeholder="3 至 32 位字母、数字或 ._-" pattern="[A-Za-z0-9_.\-]{3,32}" autocomplete="off" required></label><label>初始密码<div class="password-generator"><input v-model="form.password" placeholder="6 位字母或数字" minlength="6" maxlength="6" pattern="[A-Za-z0-9]{6}" autocomplete="new-password" required><button type="button" @click="randomPassword">随机生成</button></div></label><div class="info-box"><ShieldCheck/>代理密码固定为 6 位字母或数字，登录后无需强制修改。</div></template>
       <template v-if="modal.type==='assign'"><div class="assignment-summary"><div class="phone-icon"><Smartphone/></div><div><b>已选择 {{modal.ids.length}} 台设备</b><span>分配后，对应代理即可看到自己的设备</span></div></div><label>接收代理<select v-model="form.agent_id" required><option disabled value="">请选择代理账号</option><option v-for="a in agents.filter(a=>a.enabled)" :key="a.id" :value="a.id">{{a.display_name}} · {{a.username}}</option></select></label><div v-if="!agents.some(a=>a.enabled)" class="info-box"><CircleAlert/>请先在代理管理中创建一个正常账号。</div><p class="modal-description">转移已分配设备时，原代理的访问权限会立即撤销，旧采集任务会收到停止指令。</p></template>
-      <template v-if="modal.type==='reset'"><p class="modal-description">为「{{modal.name}}」设置新的初始密码，原登录会话将失效。</p><label>新初始密码<div class="password-generator"><input v-model="form.password" placeholder="至少 10 位" minlength="10" maxlength="128" autocomplete="new-password" required><button type="button" @click="randomPassword">随机生成</button></div></label></template>
+      <template v-if="modal.type==='reset'"><p class="modal-description">为「{{modal.name}}」设置新的初始密码，原登录会话将失效。</p><label>新初始密码<div class="password-generator"><input v-model="form.password" placeholder="6 位字母或数字" minlength="6" maxlength="6" pattern="[A-Za-z0-9]{6}" autocomplete="new-password" required><button type="button" @click="randomPassword">随机生成</button></div></label></template>
       <template v-if="modal.type==='rename'"><label>设备名称<input v-model.trim="form.name" maxlength="100" required></label><label>备注<textarea v-model="form.note" maxlength="500" rows="3" placeholder="填写设备用途或便于识别的信息"></textarea></label></template>
-      <template v-if="modal.type==='password'"><div v-if="user?.must_change_password" class="info-box"><KeyRound/>请先修改初始密码，再进入工作台。</div><label>当前密码<input v-model="form.current_password" type="password" autocomplete="current-password" maxlength="128" required></label><label>新密码<input v-model="form.new_password" type="password" autocomplete="new-password" minlength="10" maxlength="128" placeholder="至少 10 位" required></label><label>确认新密码<input v-model="form.confirm_password" type="password" autocomplete="new-password" minlength="10" maxlength="128" required></label></template>
-      <div v-if="modalError" class="form-error"><CircleAlert/>{{modalError}}</div></div><footer class="modal-footer"><button v-if="!user?.must_change_password" type="button" class="btn" @click="closeModal">取消</button><button class="btn primary" :disabled="modalBusy"><LoaderCircle v-if="modalBusy" class="spin"/>{{modal.type==='assign'?'确认分配':modal.type==='agent'?'创建账号':'保存'}}</button></footer></form>
+      <template v-if="modal.type==='password'"><div v-if="requiresPasswordChange" class="info-box"><KeyRound/>请先修改初始密码，再进入工作台。</div><label>当前密码<input v-model="form.current_password" type="password" autocomplete="current-password" maxlength="128" required></label><label>新密码<input v-model="form.new_password" type="password" autocomplete="new-password" :minlength="passwordMinLength" :maxlength="passwordMaxLength" :pattern="passwordPattern" :placeholder="passwordHint" required></label><label>确认新密码<input v-model="form.confirm_password" type="password" autocomplete="new-password" :minlength="passwordMinLength" :maxlength="passwordMaxLength" :pattern="passwordPattern" required></label></template>
+      <div v-if="modalError" class="form-error"><CircleAlert/>{{modalError}}</div></div><footer class="modal-footer"><button v-if="!requiresPasswordChange" type="button" class="btn" @click="closeModal">取消</button><button class="btn primary" :disabled="modalBusy"><LoaderCircle v-if="modalBusy" class="spin"/>{{modal.type==='assign'?'确认分配':modal.type==='agent'?'创建账号':'保存'}}</button></footer></form>
     <template v-else-if="modal.type==='confirm'"><div class="modal-body"><p class="confirm-copy">{{modal.message}}</p><div v-if="modalError" class="form-error"><CircleAlert/>{{modalError}}</div></div><footer class="modal-footer"><button class="btn" @click="closeModal">取消</button><button class="btn primary" :disabled="modalBusy" @click="modalSubmit"><LoaderCircle v-if="modalBusy" class="spin"/>确认</button></footer></template>
     <template v-else-if="modal.type==='help'"><div class="modal-body help-content"><div class="info-box"><Server/>手机端只需要服务器地址，不填写代理账号。</div><h3>设备接入</h3><p>将服务器部署为 HTTPS。手机 App 加载 dylib 后，3 秒后自动连接内置的 wxjk.jk92.cc，并自动上报首张图；不再弹出地址框。</p><h3>分配与查看</h3><p>总台在待分配列表选择设备，下发给代理。代理登录自己的账号后，即可查看对应设备。</p><h3>手机自主采集</h3><p>开始实时采集后，等待手机确认。任务由手机保存并执行，关闭网页不会停止。App 不活动时暂停，恢复后继续；需要结束时点击停止任务。</p><h3>当前采集能力</h3><p>图片是你自己 App 当前活动窗口的 PNG。定位仅在手机端声明支持后开放；图片与位置均按设备归属授权。</p><div v-if="isLocalHTTP" class="info-box amber"><CircleAlert/>当前网页为 HTTP 本地预览，手机端正式接入需要 HTTPS 地址。</div></div><footer class="modal-footer"><button class="btn primary" @click="closeModal">知道了</button></footer></template>
 

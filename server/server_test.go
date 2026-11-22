@@ -82,12 +82,11 @@ func setupFixture(t *testing.T) *fixture {
 }
 func (f *fixture) agent(name string) *browser {
 	f.t.Helper()
-	f.admin.request("POST", "/api/v1/admin/agents", map[string]any{"username": name, "display_name": name, "password": "InitialPass123!"}, 201)
+	f.admin.request("POST", "/api/v1/admin/agents", map[string]any{"username": name, "display_name": name, "password": "123456"}, 201)
 	b := newBrowser(f.t, f.server.URL)
-	login := b.request("POST", "/api/v1/auth/login", map[string]any{"username": name, "password": "InitialPass123!"}, 200)
+	login := b.request("POST", "/api/v1/auth/login", map[string]any{"username": name, "password": "123456"}, 200)
 	b.csrf = login["csrf_token"].(string)
-	b.request("GET", "/api/v1/devices", nil, 403)
-	b.request("POST", "/api/v1/auth/password", map[string]any{"current_password": "InitialPass123!", "new_password": "ChangedPass123!"}, 200)
+	b.request("GET", "/api/v1/devices", nil, 200)
 	return b
 }
 func (b *browser) userID() string {
@@ -203,7 +202,7 @@ func TestSetupGateAndCSRF(t *testing.T) {
 	b := newBrowser(t, server.URL)
 	b.request("POST", "/api/v1/auth/setup", map[string]any{"username": "owner", "password": "OwnerPassword123!", "setup_token": "wrong"}, 403)
 	reply := b.request("POST", "/api/v1/auth/setup", map[string]any{"username": "owner", "password": "OwnerPassword123!", "setup_token": "secret-setup"}, 200)
-	b.request("POST", "/api/v1/admin/agents", map[string]any{"username": "north", "password": "InitialPass123!"}, 403)
+	b.request("POST", "/api/v1/admin/agents", map[string]any{"username": "north", "password": "123456"}, 403)
 	b.csrf = reply["csrf_token"].(string)
 	b.request("POST", "/api/v1/auth/setup", map[string]any{"username": "other", "password": "OwnerPassword123!", "setup_token": "secret-setup"}, 409)
 	request, _ := http.NewRequest("POST", server.URL+"/api/v1/auth/login", strings.NewReader(`{"username":"owner","password":"OwnerPassword123!"}`))
@@ -404,14 +403,14 @@ func TestAgentDisableAndPasswordResetRevokeSessions(t *testing.T) {
 	f := setupFixture(t)
 	agent := f.agent("north")
 	id := agent.userID()
-	f.admin.request("POST", "/api/v1/admin/agents/"+id+"/password", map[string]any{"password": "ResetPassword123!"}, 200)
+	f.admin.request("POST", "/api/v1/admin/agents/"+id+"/password", map[string]any{"password": "654321"}, 200)
 	agent.request("GET", "/api/v1/auth/me", nil, 401)
-	login := agent.request("POST", "/api/v1/auth/login", map[string]any{"username": "north", "password": "ResetPassword123!"}, 200)
+	login := agent.request("POST", "/api/v1/auth/login", map[string]any{"username": "north", "password": "654321"}, 200)
 	agent.csrf = login["csrf_token"].(string)
-	agent.request("POST", "/api/v1/auth/password", map[string]any{"current_password": "ResetPassword123!", "new_password": "ChangedAgain123!"}, 200)
+	agent.request("POST", "/api/v1/auth/password", map[string]any{"current_password": "654321", "new_password": "Ab12cD"}, 200)
 	f.admin.request("PATCH", "/api/v1/admin/agents/"+id, map[string]any{"enabled": false}, 200)
 	agent.request("GET", "/api/v1/auth/me", nil, 401)
-	agent.request("POST", "/api/v1/auth/login", map[string]any{"username": "north", "password": "ChangedAgain123!"}, 401)
+	agent.request("POST", "/api/v1/auth/login", map[string]any{"username": "north", "password": "Ab12cD"}, 401)
 }
 
 func TestRestartPreservesIdentityCommandsAndTask(t *testing.T) {

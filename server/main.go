@@ -86,6 +86,11 @@ func NewApp(c Config) (*App, error) {
 	if err = db.AutoMigrate(&User{}, &LoginSession{}, &Device{}, &Assignment{}, &Command{}, &ImageSession{}, &ImageReport{}, &LocationReport{}, &AuditLog{}); err != nil {
 		return nil, err
 	}
+	// Legacy agents no longer require an initial-password change. Do not rewrite
+	// passwords, revoke sessions, or clear the corresponding administrator flag.
+	if err = db.Model(&User{}).Where("role = ? AND must_change_password = ?", "agent", true).Update("must_change_password", false).Error; err != nil {
+		return nil, err
+	}
 	keyPath := filepath.Join(c.DataDir, "device-token.key")
 	key, err := os.ReadFile(keyPath)
 	if errors.Is(err, os.ErrNotExist) {

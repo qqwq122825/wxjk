@@ -17,6 +17,7 @@ import (
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,32}$`)
+var agentPasswordPattern = regexp.MustCompile(`^[A-Za-z0-9]{6}$`)
 var passwordSlots = make(chan struct{}, 2)
 
 func passwordHash(password string) string {
@@ -46,7 +47,22 @@ func validPassword(encoded, password string) bool {
 	actual := argon2.IDKey([]byte(password), salt, 2, 19456, 1, 32)
 	return subtle.ConstantTimeCompare(actual, expected) == 1 && valid
 }
-func passwordOK(s string) bool { return len(s) >= 10 && len(s) <= 128 }
+func passwordOK(s string) bool      { return len(s) >= 10 && len(s) <= 128 }
+func agentPasswordOK(s string) bool { return agentPasswordPattern.MatchString(s) }
+func passwordOKForRole(role, password string) bool {
+	if role == "agent" {
+		return agentPasswordOK(password)
+	}
+	return passwordOK(password)
+}
+
+// Only agents skip the old initial-password flow. Administrator flags and
+// administrator authorization are deliberately left unchanged.
+func normalizeAgentPasswordRequirement(user *User) {
+	if user.Role == "agent" {
+		user.MustChangePassword = false
+	}
+}
 
 type userRequest struct {
 	User    User
@@ -67,6 +83,7 @@ func (a *App) authenticate(r *http.Request) (*userRequest, error) {
 	if err = a.db.Where("id = ? AND enabled = ?", s.UserID, true).First(&u).Error; err != nil {
 		return nil, err
 	}
+	normalizeAgentPasswordRequirement(&u)
 	return &userRequest{User: u, Session: s}, nil
 }
 func (a *App) userRoute(handler userHandler, requirePassword bool) http.HandlerFunc {
@@ -187,6 +204,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	a.startLogin(w, r, u)
 }
 func (a *App) startLogin(w http.ResponseWriter, r *http.Request, u User) {
+	normalizeAgentPasswordRequirement(&u)
 	token := randomToken()
 	s := LoginSession{TokenHash: hashSecret(token), UserID: u.ID, CSRF: randomToken(), ExpiresAt: time.Now().UTC().Add(12 * time.Hour)}
 	if err := a.db.Create(&s).Error; err != nil {
@@ -212,8 +230,12 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, u *userRequ
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if !passwordOK(in.NewPassword) || len(in.CurrentPassword) > 128 || !validPassword(u.User.PasswordHash, in.CurrentPassword) {
-		fail(w, 400, "INVALID_PASSWORD", "当前密码不正确，或新密码不足 10 位")
+	if !passwordOKForRole(u.User.Role, in.NewPassword) || len(in.CurrentPassword) > 128 || !validPassword(u.User.PasswordHash, in.CurrentPassword) {
+		message := "当前密码不正确，或新密码需为 10 至 128 位"
+		if u.User.Role == "agent" {
+			message = "当前密码不正确，代理新密码须为 6 位字母或数字"
+		}
+		fail(w, 400, "INVALID_PASSWORD", message)
 		return
 	}
 	hash := passwordHash(in.NewPassword)
@@ -240,6 +262,7 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request, u *userRequest) {
 	}
 	rows := make([]row, 0, len(users))
 	for _, v := range users {
+		normalizeAgentPasswordRequirement(&v)
 		var count int64
 		a.db.Model(&Device{}).Where("agent_id = ?", v.ID).Count(&count)
 		rows = append(rows, row{v, count})
@@ -255,11 +278,11 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, u *userRequest
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if !usernamePattern.MatchString(in.Username) || !passwordOK(in.Password) || len(in.DisplayName) > 100 {
-		fail(w, 400, "INVALID_ACCOUNT", "请填写有效账号和至少 10 位的初始密码")
+	if !usernamePattern.MatchString(in.Username) || !agentPasswordOK(in.Password) || len(in.DisplayName) > 100 {
+		fail(w, 400, "INVALID_ACCOUNT", "请填写有效账号，代理密码须为 6 位字母或数字")
 		return
 	}
-	agent := User{ID: newID("usr_"), Username: in.Username, DisplayName: strings.TrimSpace(in.DisplayName), PasswordHash: passwordHash(in.Password), Role: "agent", Enabled: true, MustChangePassword: true}
+	agent := User{ID: newID("usr_"), Username: in.Username, DisplayName: strings.TrimSpace(in.DisplayName), PasswordHash: passwordHash(in.Password), Role: "agent", Enabled: true, MustChangePassword: false}
 	if agent.DisplayName == "" {
 		agent.DisplayName = in.Username
 	}
@@ -332,8 +355,8 @@ func (a *App) resetAgentPassword(w http.ResponseWriter, r *http.Request, u *user
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if !passwordOK(in.Password) {
-		fail(w, 400, "INVALID_PASSWORD", "初始密码至少 10 位")
+	if !agentPasswordOK(in.Password) {
+		fail(w, 400, "INVALID_PASSWORD", "代理密码须为 6 位字母或数字")
 		return
 	}
 	var target User
@@ -343,7 +366,7 @@ func (a *App) resetAgentPassword(w http.ResponseWriter, r *http.Request, u *user
 	}
 	hash := passwordHash(in.Password)
 	err := a.db.Transaction(func(tx *gorm.DB) error {
-		if e := tx.Model(&target).Updates(map[string]any{"password_hash": hash, "must_change_password": true}).Error; e != nil {
+		if e := tx.Model(&target).Updates(map[string]any{"password_hash": hash, "must_change_password": false}).Error; e != nil {
 			return e
 		}
 		if e := tx.Where("user_id = ?", target.ID).Delete(&LoginSession{}).Error; e != nil {
