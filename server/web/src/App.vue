@@ -8,6 +8,7 @@ const isLocalHTTP = window.location.protocol === 'http:'
 const nav = ref('overview'), mobileNav = ref(false), stats = ref({}), devices = ref([]), agents = ref([]), commands = ref([]), audits = ref([])
 const total = ref(0), page = ref(1), search = ref(''), filter = ref('all'), selected = ref([]), loading = ref(false), actionBusy = ref(false)
 const selectedID = ref(''), detail = ref(null), history = ref([]), detailError = ref('')
+const imagePagination = ref(emptyImagePagination()), historyBusy = ref(false), clearHistoryBusy = ref(false), historyRevision = ref(0)
 const login = ref({username:'',password:'',setup_token:''}), loginError = ref(''), showPassword = ref(false)
 const modal = ref(null), modalEl = ref(null), modalError = ref(''), modalBusy = ref(false)
 const serverReachable = ref(true)
@@ -28,16 +29,21 @@ const tabs = computed(() => [
 const pageTitle = computed(() => selectedID.value ? '设备详情' : tabs.value.find(t=>t.id===nav.value)?.name || '工作台')
 const commandNames = {GET_IMAGE:'获取窗口图片',GET_LOCATION:'获取当前位置',START_IMAGE_SESSION:'开始实时采集',STOP_IMAGE_SESSION:'停止实时采集'}
 const statusNames = {queued:'等待手机',received:'已接收',running:'执行中',waiting_foreground:'等待 App 活动',waiting_permission:'等待授权',succeeded:'已完成',failed:'执行失败',expired:'已过期',canceled:'已取消'}
-const auditNames = {'agent.create':'创建代理账号','agent.update':'修改代理账号','agent.password_reset':'重置代理密码','device.assign':'调整设备归属','device.enabled':'调整设备状态','device.rename':'修改设备备注','command.GET_IMAGE':'请求窗口图片','command.GET_LOCATION':'请求当前位置','command.START_IMAGE_SESSION':'开始实时采集','command.STOP_IMAGE_SESSION':'停止实时采集'}
+const auditNames = {'images.clear':'清空设备图片','agent.create':'创建代理账号','agent.update':'修改代理账号','agent.password_reset':'重置代理密码','device.assign':'调整设备归属','device.enabled':'调整设备状态','device.rename':'修改设备备注','command.GET_IMAGE':'请求窗口图片','command.GET_LOCATION':'请求当前位置','command.START_IMAGE_SESSION':'开始实时采集','command.STOP_IMAGE_SESSION':'停止实时采集'}
 const stateTone = s => ['succeeded','running'].includes(s)?'green':['failed','expired','canceled'].includes(s)?'red':'amber'
 const shortID = id => id ? id.slice(-8).toUpperCase() : '—'
 const date = (v,full=false) => v ? new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',...(full?{month:'2-digit',day:'2-digit'}:{}),hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(v)) : '—'
 const age = v => {if(!v)return '尚无记录';let n=Math.max(0,Math.floor((Date.now()-new Date(v))/1000));return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
 const day = computed(() => new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'long',day:'numeric',weekday:'long'}).format(new Date()))
 let interval, detailPoll, detailPollAt=0, detailRefreshBusy=null, searchTimer, toastTimer, inFlight=null, sessionEpoch=0, detailReturnRoute='#/devices'
+let historyEpoch=0,historyViewEpoch=0,historyRequest=null,clearHistoryRequest=null
 const pendingRequests = new Set(), API_TIMEOUT_MS = 15000
+function emptyImagePagination(){return {page:1,page_size:14,total:0,total_pages:1}}
+function imageScope(device=detail.value){return [device?.id||selectedID.value,device?.assignment_id||'',device?.assignment_version??''].join(':')}
+function resetImageHistory(){historyEpoch++;historyViewEpoch++;historyRequest=null;clearHistoryRequest=null;historyBusy.value=false;clearHistoryBusy.value=false;history.value=[];imagePagination.value=emptyImagePagination();historyRevision.value++;detailRefreshBusy=null}
+function applyImageHistory(data,requestedPage){const items=Array.isArray(data.items)?data.items:[];const total=Math.max(0,Number(data.total??items.length)||0),pageSize=Math.max(1,Number(data.page_size)||14);history.value=items;imagePagination.value={page:Math.max(1,Number(data.page)||requestedPage),page_size:pageSize,total,total_pages:Math.max(1,Number(data.total_pages)||Math.ceil(total/pageSize))}}
 function cancelSessionWork(){
-  sessionEpoch++;inFlight=null;detailRefreshBusy=null;loading.value=false;clearTimeout(searchTimer)
+  sessionEpoch++;inFlight=null;detailRefreshBusy=null;loading.value=false;clearTimeout(searchTimer);resetImageHistory()
   const previous=[...pendingRequests];pendingRequests.clear()
   for(const controller of previous)controller.abort()
 }
@@ -90,13 +96,13 @@ function syncRoute(fetchData=true){
   mobileNav.value=false
   if(match){
     if(!previousID)detailReturnRoute='#/'+(['devices','pending'].includes(nav.value)?nav.value:'devices')
-    if(previousID!==match[1]){selectedID.value=match[1];detail.value=null;history.value=[];detailError.value=''}
+    if(previousID!==match[1]){resetImageHistory();selectedID.value=match[1];detail.value=null;detailError.value=''}
     document.title=(detail.value?.name||'设备详情')+' · JK Monitor'
     if(fetchData&&user.value&&!requiresPasswordChange.value)refreshDetail()
   }else{
     const target=route.slice(1)
     const allowed=tabs.value.some(tab=>tab.id===target)?target:'overview'
-    selectedID.value='';detail.value=null;history.value=[];detailError.value=''
+    resetImageHistory();selectedID.value='';detail.value=null;detailError.value=''
     if(nav.value!==allowed){page.value=1;selected.value=[];search.value='';filter.value='all'}
     nav.value=allowed
     document.title=pageTitle.value+' · JK Monitor'
@@ -109,23 +115,67 @@ watch([filter,page,overviewTab],()=>loadData())
 watch(search,()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page.value=1;loadData()},300)})
 async function refreshDetail(latestOnly=false){
   const id=selectedID.value,requestEpoch=sessionEpoch
-  if(!id||(detailRefreshBusy?.epoch===requestEpoch&&detailRefreshBusy.id===id))return
-  const request={epoch:requestEpoch,id};detailRefreshBusy=request
+  if(!id||clearHistoryBusy.value||(detailRefreshBusy?.epoch===requestEpoch&&detailRefreshBusy.id===id))return
+  const withHistory=!latestOnly&&!historyBusy.value,requestedPage=imagePagination.value.page
+  const request={epoch:requestEpoch,id,scope:imageScope()};detailRefreshBusy=request
+  const historyToken=withHistory?{epoch:historyEpoch,id,session:requestEpoch,page:requestedPage}:null
+  if(historyToken){historyRequest=historyToken;historyBusy.value=true}
   try{
-    const [d,h]=await Promise.all([api('/devices/'+id),latestOnly?Promise.resolve(null):api('/devices/'+id+'/images')])
+    const query=new URLSearchParams({page:String(requestedPage),page_size:'14'})
+    const [d,h]=await Promise.all([api('/devices/'+id),withHistory?api('/devices/'+id+'/images?'+query):Promise.resolve(null)])
     if(selectedID.value!==id||requestEpoch!==sessionEpoch||detailRefreshBusy!==request)return
-    detail.value=d;if(h)history.value=h.items;detailError.value=''
+    const assignmentChanged=!!detail.value&&imageScope(d)!==request.scope
+    detail.value=d;detailError.value=''
+    if(assignmentChanged){resetImageHistory();await loadHistoryPage(1)}
+    else if(h&&historyRequest===historyToken&&historyToken.epoch===historyEpoch){applyImageHistory(h,requestedPage)}
     document.title=d.name+' · JK Monitor'
   }catch(e){
     if(requestEpoch!==sessionEpoch||selectedID.value!==id||detailRefreshBusy!==request)return
     if(e.status===404){closeModal();closeDetail();notify('设备不存在，或访问权限已更新',true)}else detailError.value=e.message
-  }finally{if(detailRefreshBusy===request)detailRefreshBusy=null}
+  }finally{
+    if(detailRefreshBusy===request)detailRefreshBusy=null
+    if(historyToken&&historyRequest===historyToken){historyRequest=null;historyBusy.value=false}
+  }
 }
+async function loadHistoryPage(value){
+  const id=selectedID.value,requestedPage=Math.max(1,Math.floor(Number(value)||1))
+  if(!id||clearHistoryBusy.value)return
+  const request={epoch:++historyEpoch,id,session:sessionEpoch,scope:imageScope(),page:requestedPage};historyRequest=request;historyBusy.value=true
+  try{
+    const query=new URLSearchParams({page:String(requestedPage),page_size:'14'})
+    const data=await api('/devices/'+id+'/images?'+query)
+    if(historyRequest!==request||request.epoch!==historyEpoch||request.session!==sessionEpoch||selectedID.value!==id||imageScope()!==request.scope)return
+    applyImageHistory(data,requestedPage)
+    if(imagePagination.value.page>imagePagination.value.total_pages){await loadHistoryPage(imagePagination.value.total_pages)}
+  }catch(e){if(historyRequest===request&&request.session===sessionEpoch&&selectedID.value===id&&e.code!=='SESSION_CHANGED')notify(e.message,true)}
+  finally{if(historyRequest===request){historyRequest=null;historyBusy.value=false}}
+}
+async function openClearImageHistory(){
+  if(!detail.value||clearHistoryBusy.value)return
+  const id=selectedID.value,name=detail.value.name,requestEpoch=sessionEpoch,view=historyViewEpoch,scope=imageScope()
+  await openModal('confirm',{title:'清空设备图片',message:`确定清空「${name}」的全部可访问图片吗？包含所有分页和当前画面，删除后无法恢复。设备、代理归属、定位及采集任务不受影响；若仍在实时采集，之后会继续产生新图片。`})
+  if(requestEpoch!==sessionEpoch||view!==historyViewEpoch||selectedID.value!==id)return
+  confirmCallback.value=async()=>{
+    if(requestEpoch!==sessionEpoch||view!==historyViewEpoch||selectedID.value!==id||imageScope()!==scope)throw new Error('设备或归属已更新，请关闭后重新确认')
+    const request={id,session:requestEpoch,view};clearHistoryRequest=request;clearHistoryBusy.value=true
+    historyEpoch++;historyRequest=null;historyBusy.value=false;detailRefreshBusy=null
+    let cleared=false
+    try{
+      const result=await api('/devices/'+id+'/images',{method:'DELETE'})
+      if(clearHistoryRequest!==request||requestEpoch!==sessionEpoch||selectedID.value!==id||imageScope()!==scope)return
+      detail.value={...detail.value,latest_image:null,last_image_at:null};resetImageHistory();cleared=true
+      const count=Math.max(0,Number(result.cleared)||0),cleanupFailed=Number(result.file_cleanup_failed)||0
+      notify(cleanupFailed?`图片列表已清空（${count} 张），部分文件清理未完成`:`已清空 ${count} 张图片`,cleanupFailed>0)
+    }finally{if(clearHistoryRequest===request){clearHistoryRequest=null;clearHistoryBusy.value=false}}
+    if(cleared&&requestEpoch===sessionEpoch&&selectedID.value===id)await refreshDetail()
+  }
+}
+
 function openDevice(d){setRoute(deviceHref(d.id))}
 function closeDetail(){setRoute(detailReturnRoute)}
 async function openModal(type,data={}){const requestEpoch=sessionEpoch;modalError.value='';form.value={...data};modal.value={type,...data};if(type==='assign'){try{const data=await api('/admin/agents');if(requestEpoch!==sessionEpoch)return;agents.value=data.items}catch(e){if(requestEpoch!==sessionEpoch)return;modalError.value=e.message}};await nextTick();if(requestEpoch===sessionEpoch&&modal.value?.type===type&&modalEl.value&&!modalEl.value.open)modalEl.value.showModal()}
 function closeModal(){if(requiresPasswordChange.value&&modal.value?.type==='password')return;modalEl.value?.close();modal.value=null;modalError.value='';confirmCallback.value=null}
-async function modalSubmit(){modalError.value='';modalBusy.value=true;try{
+async function modalSubmit(){const requestEpoch=sessionEpoch,submittedModal=modal.value;modalError.value='';modalBusy.value=true;try{
   const type=modal.value.type
   if(['agent','reset'].includes(type)&&!agentPasswordOK(form.value.password))throw new Error('代理密码必须是 6 位字母或数字')
   if(type==='password'&&user.value?.role==='agent'&&!agentPasswordOK(form.value.new_password))throw new Error('代理密码必须是 6 位字母或数字')
@@ -135,8 +185,9 @@ async function modalSubmit(){modalError.value='';modalBusy.value=true;try{
   if(type==='rename'){await api('/devices/'+modal.value.id,{method:'PATCH',body:form.value});notify('设备信息已保存')}
   if(type==='password'){if(form.value.new_password!==form.value.confirm_password)throw new Error('两次输入的新密码不一致');const d=await api('/auth/password',{method:'POST',body:form.value});user.value=d.user;notify('密码已更新')}
   if(type==='confirm'&&confirmCallback.value)await confirmCallback.value()
+  if(requestEpoch!==sessionEpoch||modal.value!==submittedModal)return
   modalEl.value?.close();modal.value=null;confirmCallback.value=null;form.value={};await loadData()
- }catch(e){modalError.value=e.message}finally{modalBusy.value=false}}
+ }catch(e){if(requestEpoch===sessionEpoch&&modal.value===submittedModal)modalError.value=e.message}finally{if(requestEpoch===sessionEpoch)modalBusy.value=false}}
 function agentPasswordOK(value){return typeof value==='string'&&value.length===6&&/^[A-Za-z0-9]{6}$/.test(value)}
 function randomPassword(){const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';let password='';while(password.length<6){for(const byte of crypto.getRandomValues(new Uint8Array(12))){if(byte<248)password+=chars[byte%chars.length];if(password.length===6)break}}form.value.password=password}
 async function toggleAgent(agent){await openModal('confirm',{title:agent.enabled?'禁用代理账号':'启用代理账号',message:agent.enabled?`禁用「${agent.display_name}」后，其登录会话和发起的采集任务将撤销，名下设备仍由总台管理。`:`恢复「${agent.display_name}」的登录权限。`});confirmCallback.value=async()=>{await api('/admin/agents/'+agent.id,{method:'PATCH',body:{enabled:!agent.enabled}});notify(agent.enabled?'账号已禁用':'账号已启用')}}
@@ -168,7 +219,7 @@ onUnmounted(()=>{cancelSessionWork();window.removeEventListener('hashchange',rou
 
     <div class="main-shell"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-only" aria-label="打开导航" @click="mobileNav=true"><Menu/></button><span>{{isAdmin?'总台':'我的工作台'}}</span><ChevronRight/><b>{{pageTitle}}</b></div><div class="top-actions"><span class="top-date">{{day}}</span><span class="separator"></span><button class="icon-btn" title="修改密码" aria-label="修改密码" @click="openModal('password')"><KeyRound/></button><div class="small-avatar">{{user.display_name?.slice(0,1)}}</div></div></header>
       <main class="content"><div v-if="!serverReachable" class="connection-warning" role="status"><CircleAlert/>与服务器连接中断，当前状态可能不是最新，正在自动重试。</div>
-      <DeviceDetail v-if="selectedID" :key="selectedID" :device="detail" :images="history" :error="detailError" :action-busy="actionBusy" :is-admin="isAdmin" @back="closeDetail" @refresh="refreshDetail" @command="sendCommand" @copy="copy" @rename="openModal('rename',{id:detail.id,name:detail.name,note:detail.note})" @assign="openModal('assign',{ids:[detail.id]})" @reclaim="reclaim(detail)" @toggle="toggleDevice(detail)"/>
+      <DeviceDetail v-if="selectedID" :key="selectedID" :device="detail" :images="history" :image-pagination="imagePagination" :history-busy="historyBusy" :clear-history-busy="clearHistoryBusy" :history-revision="historyRevision" :error="detailError" :action-busy="actionBusy" :is-admin="isAdmin" @back="closeDetail" @refresh="refreshDetail" @history-page="loadHistoryPage" @clear-history="openClearImageHistory" @command="sendCommand" @copy="copy" @rename="openModal('rename',{id:detail.id,name:detail.name,note:detail.note})" @assign="openModal('assign',{ids:[detail.id]})" @reclaim="reclaim(detail)" @toggle="toggleDevice(detail)"/>
       <template v-else><div class="page-heading"><div><div class="eyebrow">{{nav==='overview'?'WORKSPACE OVERVIEW':nav==='agents'?'AGENT MANAGEMENT':nav==='commands'?'TASK ACTIVITY':nav==='audit'?'AUDIT LOG':'DEVICE MANAGEMENT'}}</div><h1>{{nav==='overview'?(isAdmin?'设备运行概览':'我的设备概览'):pageTitle}}<span v-if="nav==='pending'" class="count-pill">{{stats.unassigned||0}}</span></h1><p>{{nav==='overview'?'所有连接与任务，在这里一目了然。':nav==='pending'?'新设备首先进入总台，下发后代理即可查看和操作。':nav==='agents'?'创建代理账号，为每个人分配独立的设备访问权限。':nav==='commands'?'跟踪手机的接收确认、执行状态与返回结果。':nav==='audit'?'每一次账号和设备管理操作都有记录。':'查看设备状态、管理归属，或打开设备进行远程采集。'}}</p></div><div class="heading-actions"><button class="btn" :disabled="loading" @click="loadData()"><RefreshCw :class="{spin:loading}"/>刷新</button><button v-if="nav==='agents'" class="btn primary" @click="openModal('agent')"><Plus/>创建代理</button></div></div>
 
       <template v-if="nav==='overview'">

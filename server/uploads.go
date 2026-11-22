@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -271,18 +272,134 @@ func (a *App) uploadImage(w http.ResponseWriter, r *http.Request, authenticated 
 	jsonOut(w, 201, map[string]any{"id": report.ID, "report_id": report.ReportID, "status": "succeeded"})
 }
 
+// Images are paginated separately from the current live preview. Only retained
+// history and the current latest frame belong in the gallery; grace-period
+// transient frames stay readable by ID but do not inflate its page count.
 func (a *App) images(w http.ResponseWriter, r *http.Request, u *userRequest) {
+	page, size := 1, 14
+	for key, destination := range map[string]*int{"page": &page, "page_size": &size} {
+		if values, present := r.URL.Query()[key]; present {
+			if len(values) != 1 {
+				fail(w, 400, "INVALID_PAGINATION", "分页参数必须为正整数，单页最多 60 张")
+				return
+			}
+			value, err := strconv.Atoi(values[0])
+			if err != nil || value < 1 {
+				fail(w, 400, "INVALID_PAGINATION", "分页参数必须为正整数，单页最多 60 张")
+				return
+			}
+			*destination = value
+		}
+	}
+	if size > 60 || page-1 > int(^uint(0)>>1)/size {
+		fail(w, 400, "INVALID_PAGINATION", "分页参数超出范围，单页最多 60 张")
+		return
+	}
+	// Match the assignment/upload write lock so a transfer cannot race the
+	// authorization check or turn the count and items into different snapshots.
+	a.writes.Lock()
+	defer a.writes.Unlock()
 	d, ok := a.authorizedDevice(w, r, u)
 	if !ok {
 		return
 	}
-	q := a.db.Where("device_id = ? AND file_name <> ? AND (keep_history = ? OR id = ?)", d.ID, "", true, d.LatestImageID)
+	q := a.db.Model(&ImageReport{}).Where("device_id = ? AND file_name <> ? AND (keep_history = ? OR id = ?)", d.ID, "", true, d.LatestImageID)
 	if u.User.Role != "admin" {
 		q = q.Where("assignment_id = ?", d.AssignmentID)
 	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		fail(w, 500, "DATABASE_ERROR", "无法读取图片数量")
+		return
+	}
+	rows := make([]ImageReport, 0)
+	if err := q.Order("received_at DESC").Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&rows).Error; err != nil {
+		fail(w, 500, "DATABASE_ERROR", "无法读取图片列表")
+		return
+	}
+	jsonOut(w, 200, map[string]any{"items": rows, "total": total, "page": page, "page_size": size, "total_pages": (total + int64(size) - 1) / int64(size)})
+}
+
+// Clear only this actor's accessible images for this device. Tombstones retain
+// report identity, so a retry of an old upload cannot resurrect a cleared image.
+// Capture tasks, commands, assignment/location data and prior audits are untouched.
+func (a *App) clearImages(w http.ResponseWriter, r *http.Request, u *userRequest) {
+	a.writes.Lock()
+	defer a.writes.Unlock()
 	var rows []ImageReport
-	q.Order("received_at desc").Limit(60).Find(&rows)
-	jsonOut(w, 200, map[string]any{"items": rows})
+	err := a.db.Transaction(func(tx *gorm.DB) error {
+		var d Device
+		if err := a.scopedDevices(tx, u).Where("id = ?", r.PathValue("id")).First(&d).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return &apiError{404, "NOT_FOUND", "设备不存在或不属于当前账号"}
+			}
+			return err
+		}
+		scopedImages := func() *gorm.DB {
+			q := tx.Model(&ImageReport{}).Where("device_id = ? AND file_name <> ?", d.ID, "")
+			if u.User.Role != "admin" {
+				q = q.Where("assignment_id = ?", d.AssignmentID)
+			}
+			return q
+		}
+		if err := scopedImages().Find(&rows).Error; err != nil {
+			return err
+		}
+		clearLatest := false
+		for _, row := range rows {
+			clearLatest = clearLatest || row.ID == d.LatestImageID
+		}
+		// Repair an already-cleared latest pointer too, but never let an agent
+		// modify a latest image belonging to another assignment.
+		if !clearLatest && d.LatestImageID != "" {
+			var latest ImageReport
+			latestQuery := tx.Where("id = ? AND device_id = ?", d.LatestImageID, d.ID)
+			if u.User.Role != "admin" {
+				latestQuery = latestQuery.Where("assignment_id = ?", d.AssignmentID)
+			}
+			if err := latestQuery.First(&latest).Error; err == nil {
+				clearLatest = true
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+		// Avoid large SQL IN lists while using exactly the same scoped query.
+		if len(rows) > 0 {
+			if err := scopedImages().Update("file_name", "").Error; err != nil {
+				return err
+			}
+		}
+		if clearLatest {
+			if err := tx.Model(&d).Updates(map[string]any{"latest_image_id": "", "last_image_at": nil}).Error; err != nil {
+				return err
+			}
+		}
+		return a.audit(tx, u.User.ID, "images.clear", d.ID)
+	})
+	if err != nil {
+		uploadFailure(w, err)
+		return
+	}
+	removed, missing, pending := 0, 0, 0
+	for _, row := range rows {
+		path := a.imagePath(row.FileName)
+		if path == "" {
+			pending++
+			continue
+		}
+		if err := os.Remove(path); err == nil {
+			removed++
+		} else if errors.Is(err, os.ErrNotExist) {
+			missing++
+		} else {
+			pending++
+		}
+	}
+	message := "当前设备可访问的图片已清空；采集任务如仍运行，会继续产生新图片"
+	if pending > 0 {
+		message = "图片列表已清空，但部分文件清理未完成"
+	}
+	jsonOut(w, 200, map[string]any{"cleared": len(rows), "files_removed": removed, "files_missing": missing, "file_cleanup_failed": pending, "message": message})
 }
 func (a *App) imageFile(w http.ResponseWriter, r *http.Request, u *userRequest) {
 	var image ImageReport

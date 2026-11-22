@@ -57,7 +57,7 @@ async function fixture({ role = 'agent', legacyFlag = true, authenticated = true
     else if (url === '/api/v1/auth/password') data = { user: { ...user, must_change_password: false } }
     else if (url === '/api/v1/dashboard') data = { total: 0, online: 0, unassigned: 0 }
     else if (url.startsWith('/api/v1/devices?') || url === '/api/v1/admin/agents') data = { items: [], total: 0 }
-    else if (url.endsWith('/images')) data = { items: [] }
+    else if (/\/images(?:\?|$)/.test(url)) data = { items: [] }
     else if (url.startsWith('/api/v1/devices/dev_')) data = { id: 'dev_fixture', name: '测试设备', enabled: true }
     else if (url.startsWith('/api/v1/admin/agents/') && options.method === 'POST') data = { status: 'ok' }
     else throw new Error('Unexpected mock request: ' + url)
@@ -222,9 +222,9 @@ test('acceptSession alone isolates previous account data and pending detail requ
     const current=f.vm.refreshDetail();assert.equal(newRequests.length,2)
     await oldDetail
     await f.vm.refreshDetail();assert.equal(newRequests.length,2,'old detail finally cannot unlock current request')
-    for(const r of newRequests)r.resolve(response(r.url.endsWith('/images')?{items:[]}:{id:'dev_new',name:'new device'}))
+    for(const r of newRequests)r.resolve(response(/\/images(?:\?|$)/.test(r.url)?{items:[]}:{id:'dev_new',name:'new device'}))
     await current
-    for(const r of oldRequests)r.resolve(response(r.url.endsWith('/images')?{items:[{id:'private_old_image'}]}:{id:'dev_old',name:'old device'}))
+    for(const r of oldRequests)r.resolve(response(/\/images(?:\?|$)/.test(r.url)?{items:[{id:'private_old_image'}]}:{id:'dev_old',name:'old device'}))
     await flush();assert.equal(f.vm.detail.id,'dev_new');assert.deepEqual(f.vm.history,[])
   } finally {globalThis.fetch=originalFetch;await f.close()}
 })

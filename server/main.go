@@ -166,6 +166,7 @@ func (a *App) Routes() http.Handler {
 	m.HandleFunc("PATCH /api/v1/devices/{id}", a.userRoute(a.renameDevice, true))
 	m.HandleFunc("POST /api/v1/devices/{id}/commands", a.userRoute(a.createCommand, true))
 	m.HandleFunc("GET /api/v1/devices/{id}/images", a.userRoute(a.images, true))
+	m.HandleFunc("DELETE /api/v1/devices/{id}/images", a.userRoute(a.clearImages, true))
 	m.HandleFunc("GET /api/v1/devices/{id}/locations", a.userRoute(a.locations, true))
 	m.HandleFunc("GET /api/v1/commands", a.userRoute(a.commands, true))
 	m.HandleFunc("GET /api/v1/images/{id}/file", a.userRoute(a.imageFile, true))
